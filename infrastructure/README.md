@@ -18,6 +18,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | Template | Purpose |
 | --- | --- |
 | `base.yaml` | Foundational per-environment stack: shared SSM configuration parameters and the shared application log group. Deploy this first for a new environment. |
+| `hosting.yaml` | Static website hosting: a private S3 bucket (holding the built UI) behind a CloudFront distribution using Origin Access Control, so the bucket is never reachable directly. Reachable via its default `*.cloudfront.net` domain until Story 1.4 maps a custom domain to it. |
 
 ## Deploying and deleting a stack
 
@@ -35,6 +36,29 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 Both scripts derive the stack name from the environment and template name, so deploying and deleting a given environment's stacks is fully scripted — no manual cleanup steps in the AWS Console are required.
 
 Additional `--parameter-overrides key=value` pairs can be appended to `deploy-stack.sh` for templates that take more than the `Environment` parameter.
+
+## Verifying the website hosting stack
+
+After deploying `hosting.yaml`, confirm the S3 bucket and CloudFront distribution are correctly wired together by uploading a test page and requesting it through CloudFront (not directly from S3 — direct S3 access should be blocked):
+
+```bash
+# Deploy the hosting stack for dev
+./scripts/deploy-stack.sh dev hosting
+
+# Look up the bucket name and CloudFront domain name from the stack outputs
+BUCKET=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-hosting \
+  --query "Stacks[0].Outputs[?OutputKey=='WebsiteBucketName'].OutputValue" --output text)
+DISTRIBUTION_DOMAIN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-hosting \
+  --query "Stacks[0].Outputs[?OutputKey=='WebsiteDistributionDomainName'].OutputValue" --output text)
+
+# Upload the test page
+aws s3 cp test-site/index.html "s3://${BUCKET}/index.html"
+
+# Request it through CloudFront (allow a few minutes for the distribution to deploy)
+curl -I "https://${DISTRIBUTION_DOMAIN}/"
+```
+
+A successful check returns `HTTP/2 200` from the CloudFront domain. Requesting the same object directly from the bucket's URL should be denied (`403 Forbidden`), confirming the bucket isn't publicly reachable outside of CloudFront.
 
 ## Prerequisites
 
