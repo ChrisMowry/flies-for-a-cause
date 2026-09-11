@@ -1,0 +1,104 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - base/foundation stack. Establishes the per-environment
+  naming, tagging, and shared-configuration conventions that every other
+  CloudFormation template in this project follows. Deployed once per
+  environment (dev, prod).
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Mappings:
+  EnvironmentConfig:
+    dev:
+      WebsiteDomainName: dev.flies-for-a-cause.org
+      ApiDomainName: dev-api.flies-for-a-cause.org
+      LogRetentionInDays: 14
+    prod:
+      WebsiteDomainName: flies-for-a-cause.org
+      ApiDomainName: api.flies-for-a-cause.org
+      LogRetentionInDays: 90
+
+Resources:
+  # Shared config values other stacks can read via SSM dynamic references or
+  # cross-stack imports, instead of hardcoding environment-specific values.
+  EnvironmentParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/environment"
+      Type: String
+      Value: !Ref Environment
+      Description: The environment name (dev/prod) for this deployment.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  WebsiteDomainNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/website-domain-name"
+      Type: String
+      Value: !FindInMap [EnvironmentConfig, !Ref Environment, WebsiteDomainName]
+      Description: The public website domain name for this environment.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  ApiDomainNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/api-domain-name"
+      Type: String
+      Value: !FindInMap [EnvironmentConfig, !Ref Environment, ApiDomainName]
+      Description: The public API domain name for this environment.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  # Shared application log group. Deletes cleanly with the stack (unlike,
+  # e.g., an S3 bucket with objects in it), keeping deploy/delete repeatable.
+  ApplicationLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/flies-for-a-cause/${Environment}/application"
+      RetentionInDays: !FindInMap [EnvironmentConfig, !Ref Environment, LogRetentionInDays]
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  Environment:
+    Description: The environment this stack was deployed for.
+    Value: !Ref Environment
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-Environment"
+
+  WebsiteDomainName:
+    Description: The public website domain name for this environment.
+    Value: !FindInMap [EnvironmentConfig, !Ref Environment, WebsiteDomainName]
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-WebsiteDomainName"
+
+  ApiDomainName:
+    Description: The public API domain name for this environment.
+    Value: !FindInMap [EnvironmentConfig, !Ref Environment, ApiDomainName]
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ApiDomainName"
+
+  ApplicationLogGroupName:
+    Description: The shared application CloudWatch Log Group name.
+    Value: !Ref ApplicationLogGroup
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ApplicationLogGroupName"
