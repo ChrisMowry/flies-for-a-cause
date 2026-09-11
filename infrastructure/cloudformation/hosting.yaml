@@ -1,0 +1,142 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - static website hosting stack. Provisions a private S3
+  bucket for the built UI and a CloudFront distribution in front of it,
+  using Origin Access Control so the bucket is never publicly reachable
+  directly. Custom domain/ACM certificate association is added in the
+  Route53 stack (Epic 1, Story 1.4); this stack is reachable via its
+  default *.cloudfront.net domain.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  WebsiteBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "flies-for-a-cause-${Environment}-website-${AWS::AccountId}"
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      VersioningConfiguration:
+        Status: Enabled
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  WebsiteOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "flies-for-a-cause-${Environment}-website-oac"
+        Description: !Sub "OAC for the ${Environment} Flies for a Cause website bucket"
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  WebsiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "flies-for-a-cause-${Environment}-website"
+        DefaultRootObject: index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_100
+        Origins:
+          - Id: WebsiteBucketOrigin
+            DomainName: !GetAtt WebsiteBucket.RegionalDomainName
+            OriginAccessControlId: !GetAtt WebsiteOriginAccessControl.Id
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: WebsiteBucketOrigin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          # AWS managed "CachingOptimized" cache policy.
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        # The UI is a client-side-routed SPA (React Router). Any path CloudFront
+        # can't find in the bucket (a deep-linked route, not a missing asset)
+        # should fall back to index.html and let the SPA router handle it.
+        CustomErrorResponses:
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontServicePrincipalReadOnly
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${WebsiteBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${WebsiteDistribution.Id}"
+
+Outputs:
+  WebsiteBucketName:
+    Description: The name of the S3 bucket the built UI is deployed to.
+    Value: !Ref WebsiteBucket
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-WebsiteBucketName"
+
+  WebsiteBucketArn:
+    Description: The ARN of the S3 bucket the built UI is deployed to.
+    Value: !GetAtt WebsiteBucket.Arn
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-WebsiteBucketArn"
+
+  WebsiteDistributionId:
+    Description: The CloudFront distribution ID for the website.
+    Value: !Ref WebsiteDistribution
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-WebsiteDistributionId"
+
+  WebsiteDistributionDomainName:
+    Description: The default *.cloudfront.net domain name for the website (until a custom domain is mapped in Story 1.4).
+    Value: !GetAtt WebsiteDistribution.DomainName
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-WebsiteDistributionDomainName"
