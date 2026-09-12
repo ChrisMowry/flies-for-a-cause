@@ -1,0 +1,225 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment HTTP API Gateway. Provisions the
+  stable HTTPS endpoint the UI calls (api.flies-for-a-cause.org /
+  dev-api.flies-for-a-cause.org), a Cognito JWT authorizer ready for secured
+  routes, and a placeholder Lambda + two test routes (one public, one
+  JWT-protected) proving the whole chain works end-to-end. Epic 3 (Website
+  Backend API) will add the real Lambda integration and routes to this same
+  HttpApi; the stub function/routes here exist only to satisfy this story's
+  acceptance criteria and can be removed once real routes exist.
+
+  Depends on base.yaml, certificates.yaml, and cognito.yaml having already
+  been deployed for this environment.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  # --- Placeholder Lambda -----------------------------------------------
+  # Proves the API Gateway -> Lambda wiring works end-to-end. Replaced by
+  # the real Website Lambda in Epic 3.
+  StubFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "flies-for-a-cause-${Environment}-api-stub-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  StubFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "flies-for-a-cause-${Environment}-api-stub"
+      Description: Placeholder API Gateway target for Story 1.6 verification. Superseded by the Website Lambda in Epic 3.
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt StubFunctionRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            const claims =
+              event.requestContext &&
+              event.requestContext.authorizer &&
+              event.requestContext.authorizer.jwt &&
+              event.requestContext.authorizer.jwt.claims;
+
+            return {
+              statusCode: 200,
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                message: "Flies for a Cause API Gateway stub is reachable.",
+                route: event.requestContext && event.requestContext.routeKey,
+                authenticated: Boolean(claims),
+                claims: claims || null,
+              }),
+            };
+          };
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  StubFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StubFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*/*"
+
+  # --- HTTP API ------------------------------------------------------------
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "flies-for-a-cause-${Environment}-api"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - !Join ["", ["https://", !ImportValue {"Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDomainName"}]]
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Authorization
+          - Content-Type
+        MaxAge: 300
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  StubIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !GetAtt StubFunction.Arn
+      PayloadFormatVersion: "2.0"
+
+  # Public placeholder route - proves basic Lambda proxy integration works.
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /health"
+      Target: !Sub "integrations/${StubIntegration}"
+
+  # JWT-protected placeholder route - proves the Cognito authorizer works,
+  # ready for Epic 3's real secured routes to follow the same pattern.
+  HealthSecureRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /health/secure"
+      Target: !Sub "integrations/${StubIntegration}"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref JwtAuthorizer
+
+  JwtAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      Name: !Sub "flies-for-a-cause-${Environment}-cognito-jwt-authorizer"
+      AuthorizerType: JWT
+      IdentitySource:
+        - "$request.header.Authorization"
+      JwtConfiguration:
+        Audience:
+          - !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-CognitoUserPoolClientId"
+        Issuer: !Sub
+          - "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPoolId}"
+          - UserPoolId: !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-CognitoUserPoolId"
+
+  Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  # --- Custom domain ---------------------------------------------------
+  ApiDomainName:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !ImportValue
+        "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainName"
+      DomainNameConfigurations:
+        - CertificateArn: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-ApiCertificateArn"
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  ApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiDomainName
+      Stage: !Ref Stage
+
+Outputs:
+  HttpApiId:
+    Description: The HTTP API Gateway ID.
+    Value: !Ref HttpApi
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-HttpApiId"
+
+  HttpApiEndpoint:
+    Description: The API Gateway's default *.execute-api.* endpoint.
+    Value: !GetAtt HttpApi.ApiEndpoint
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-HttpApiEndpoint"
+
+  JwtAuthorizerId:
+    Description: The Cognito JWT authorizer ID, for use by future secured routes.
+    Value: !Ref JwtAuthorizer
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-JwtAuthorizerId"
+
+  ApiDomainRegionalDomainName:
+    Description: The API Gateway custom domain's regional target (for the Route53 alias record).
+    Value: !GetAtt ApiDomainName.RegionalDomainName
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ApiDomainRegionalDomainName"
+
+  ApiDomainRegionalHostedZoneId:
+    Description: The API Gateway custom domain's regional hosted zone ID (for the Route53 alias record).
+    Value: !GetAtt ApiDomainName.RegionalHostedZoneId
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ApiDomainRegionalHostedZoneId"

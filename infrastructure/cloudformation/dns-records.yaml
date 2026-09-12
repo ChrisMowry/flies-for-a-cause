@@ -1,15 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Flies for a Cause - per-environment Route53 alias records pointing the
-  website domain at its CloudFront distribution. Depends on dns-zone.yaml,
-  base.yaml, and hosting.yaml having already been deployed for this
+  website domain at its CloudFront distribution and the API domain at its
+  API Gateway custom domain. Depends on dns-zone.yaml, base.yaml,
+  hosting.yaml, and api-gateway.yaml having already been deployed for this
   environment.
-
-  Scope note: the api.flies-for-a-cause.org / dev-api.flies-for-a-cause.org
-  records are intentionally NOT created here. They target an API Gateway
-  custom domain resource that doesn't exist until Epic 1, Story 1.6 (API
-  Gateway) is implemented. Add those alias records alongside that story
-  instead of pointing this stack at a resource that doesn't exist yet.
 
 Parameters:
   Environment:
@@ -41,4 +36,31 @@ Resources:
             HostedZoneId: Z2FDTNDATAQYW2
             DNSName: !ImportValue
               "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDistributionDomainName"
+            EvaluateTargetHealth: false
+
+  ApiAliasRecordSetGroup:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !ImportValue flies-for-a-cause-dns-HostedZoneId
+      RecordSets:
+        - Name: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainName"
+          Type: A
+          AliasTarget:
+            # Unlike CloudFront's fixed hosted zone ID, API Gateway's regional
+            # domain hosted zone ID varies by region/account, so it's imported
+            # rather than hardcoded.
+            HostedZoneId: !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainRegionalHostedZoneId"
+            DNSName: !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainRegionalDomainName"
+            EvaluateTargetHealth: false
+        - Name: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainName"
+          Type: AAAA
+          AliasTarget:
+            HostedZoneId: !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainRegionalHostedZoneId"
+            DNSName: !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainRegionalDomainName"
             EvaluateTargetHealth: false

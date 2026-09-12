@@ -21,8 +21,9 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `dns-zone.yaml` | The single, global Route53 hosted zone for `flies-for-a-cause.org`. Deployed once, ever (not per environment) — see [Environments](#environments). Deploy before `certificates.yaml` or `dns-records.yaml`. |
 | `certificates.yaml` | Per-environment ACM certificates for the website and API custom domains, DNS-validated automatically against the shared hosted zone. **Must be deployed in `us-east-1`** regardless of the project's overall region, because CloudFront only accepts certificates from that region. |
 | `hosting.yaml` | Static website hosting: a private S3 bucket (holding the built UI) behind a CloudFront distribution using Origin Access Control, so the bucket is never reachable directly. Aliased to its custom domain using the certificate from `certificates.yaml`. |
-| `dns-records.yaml` | Per-environment Route53 alias records pointing the website domain (`flies-for-a-cause.org` / `dev.flies-for-a-cause.org`) at its CloudFront distribution. The API domain records (`api.` / `dev-api.`) are added alongside Story 1.6 (API Gateway), once that custom domain resource exists. |
-| `cognito.yaml` | Per-environment Cognito user pool + app client for admin authentication (up to 5 administrators), used by the Admin Page login and the API Gateway JWT authorizer (Story 1.6). Pool/client IDs are exposed via SSM parameters for the UI build. Independent of the DNS/certificate/hosting chain — only depends on `base.yaml`. |
+| `cognito.yaml` | Per-environment Cognito user pool + app client for admin authentication (up to 5 administrators), used by the Admin Page login and the API Gateway JWT authorizer. Pool/client IDs are exposed via SSM parameters for the UI build. Independent of the DNS/certificate/hosting chain — only depends on `base.yaml`. |
+| `api-gateway.yaml` | Per-environment HTTP API Gateway: the stable HTTPS endpoint the UI calls, a Cognito JWT authorizer ready for secured routes, and a placeholder Lambda + two test routes (`GET /health` public, `GET /health/secure` JWT-protected) proving the whole chain works. Epic 3 adds the real Lambda/routes to this same API. |
+| `dns-records.yaml` | Per-environment Route53 alias records pointing the website domain (`flies-for-a-cause.org` / `dev.flies-for-a-cause.org`) at its CloudFront distribution, and the API domain (`api.` / `dev-api.`) at its API Gateway custom domain. |
 
 ## Deploying and deleting a stack
 
@@ -53,17 +54,17 @@ aws cloudformation deploy \
 
 ### Deployment order for a new environment
 
-Later templates import values (domain names, certificate ARNs, the hosted zone ID) exported by earlier ones, so they must be deployed in this order the first time an environment is stood up:
+Later templates import values (domain names, certificate ARNs, the hosted zone ID, the Cognito pool, the API Gateway custom domain) exported by earlier ones, so they must be deployed in this order the first time an environment is stood up:
 
 1. `dns-zone.yaml` (only if not already deployed — it's global, see above)
 2. `base.yaml <env>`
 3. `certificates.yaml <env>` — **in `us-east-1`**
-4. `hosting.yaml <env>` (or its update, once a certificate exists)
-5. `dns-records.yaml <env>`
+4. `cognito.yaml <env>` (only depends on `base.yaml`; deployed here so `api-gateway.yaml` can use it, but order relative to steps 3-4 doesn't matter)
+5. `hosting.yaml <env>` (or its update, once a certificate exists)
+6. `api-gateway.yaml <env>` (needs `certificates.yaml` and `cognito.yaml`)
+7. `dns-records.yaml <env>` (needs `hosting.yaml` and `api-gateway.yaml`)
 
-`cognito.yaml <env>` only depends on `base.yaml` and can be deployed at any point after it, independent of the dns-zone/certificates/hosting/dns-records chain above.
-
-Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports. `cognito.yaml` can be deleted at any point in that sequence, same as it can be deployed at any point.
+Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
 
 ## Verifying the website hosting stack
 
@@ -104,7 +105,7 @@ aws acm list-certificates --region us-east-1 \
 curl -I "https://dev.flies-for-a-cause.org/"
 ```
 
-A successful check returns `HTTP/2 200` from the custom domain directly (no `*.cloudfront.net` in the URL), confirming the hosted zone, certificate, and CloudFront alias are all wired together correctly. The `api.` / `dev-api.` records aren't part of this check yet — see the scope note in `dns-records.yaml` and Story 1.6.
+A successful check returns `HTTP/2 200` from the custom domain directly (no `*.cloudfront.net` in the URL), confirming the hosted zone, certificate, and CloudFront alias are all wired together correctly.
 
 ## Verifying the Cognito user pool
 
@@ -115,6 +116,33 @@ After deploying `cognito.yaml`, confirm an admin can actually be created and aut
 ```
 
 A successful run prints an `AuthenticationResult` containing an `IdToken`, `AccessToken`, and `RefreshToken` — the `IdToken` is the JWT the Admin Page would send to the secured API routes. This script is for test/dev verification only (the password is passed as a plain CLI argument); don't reuse a real credential with it.
+
+## Verifying the API Gateway
+
+After deploying `api-gateway.yaml` (and, for the custom-domain check, `dns-records.yaml`), confirm both the public and JWT-protected placeholder routes work:
+
+```bash
+# Deploy the API Gateway stack for dev
+./scripts/deploy-stack.sh dev api-gateway
+
+# Public route — via the default *.execute-api.* endpoint
+API_ENDPOINT=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-api-gateway \
+  --query "Stacks[0].Outputs[?OutputKey=='HttpApiEndpoint'].OutputValue" --output text)
+curl -s "${API_ENDPOINT}/health"
+
+# JWT-protected route — should fail without a token...
+curl -i "${API_ENDPOINT}/health/secure"
+
+# ...and succeed with one from create-test-admin-user.sh
+ID_TOKEN=$(./scripts/create-test-admin-user.sh dev test-admin@example.com 'Tempp@ssw0rd123!' \
+  | grep -o '"IdToken": "[^"]*"' | cut -d'"' -f4)
+curl -s -H "Authorization: Bearer ${ID_TOKEN}" "${API_ENDPOINT}/health/secure"
+
+# Once dns-records.yaml is deployed, the custom domain works the same way
+curl -s "https://dev-api.flies-for-a-cause.org/health"
+```
+
+`GET /health` returns `200` with no `Authorization` header. `GET /health/secure` returns `401` without a token and `200` (with `"authenticated": true` and the token's claims) with a valid one — confirming the Cognito JWT authorizer is correctly wired up and ready for Epic 3's real secured routes to use the same pattern.
 
 ## Prerequisites
 
