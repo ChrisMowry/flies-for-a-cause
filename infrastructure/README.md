@@ -22,6 +22,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `certificates.yaml` | Per-environment ACM certificates for the website and API custom domains, DNS-validated automatically against the shared hosted zone. **Must be deployed in `us-east-1`** regardless of the project's overall region, because CloudFront only accepts certificates from that region. |
 | `hosting.yaml` | Static website hosting: a private S3 bucket (holding the built UI) behind a CloudFront distribution using Origin Access Control, so the bucket is never reachable directly. Aliased to its custom domain using the certificate from `certificates.yaml`. |
 | `dns-records.yaml` | Per-environment Route53 alias records pointing the website domain (`flies-for-a-cause.org` / `dev.flies-for-a-cause.org`) at its CloudFront distribution. The API domain records (`api.` / `dev-api.`) are added alongside Story 1.6 (API Gateway), once that custom domain resource exists. |
+| `cognito.yaml` | Per-environment Cognito user pool + app client for admin authentication (up to 5 administrators), used by the Admin Page login and the API Gateway JWT authorizer (Story 1.6). Pool/client IDs are exposed via SSM parameters for the UI build. Independent of the DNS/certificate/hosting chain — only depends on `base.yaml`. |
 
 ## Deploying and deleting a stack
 
@@ -60,7 +61,9 @@ Later templates import values (domain names, certificate ARNs, the hosted zone I
 4. `hosting.yaml <env>` (or its update, once a certificate exists)
 5. `dns-records.yaml <env>`
 
-Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
+`cognito.yaml <env>` only depends on `base.yaml` and can be deployed at any point after it, independent of the dns-zone/certificates/hosting/dns-records chain above.
+
+Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports. `cognito.yaml` can be deleted at any point in that sequence, same as it can be deployed at any point.
 
 ## Verifying the website hosting stack
 
@@ -102,6 +105,16 @@ curl -I "https://dev.flies-for-a-cause.org/"
 ```
 
 A successful check returns `HTTP/2 200` from the custom domain directly (no `*.cloudfront.net` in the URL), confirming the hosted zone, certificate, and CloudFront alias are all wired together correctly. The `api.` / `dev-api.` records aren't part of this check yet — see the scope note in `dns-records.yaml` and Story 1.6.
+
+## Verifying the Cognito user pool
+
+After deploying `cognito.yaml`, confirm an admin can actually be created and authenticated (Story 1.5's acceptance criterion) using the helper script, which creates/resets a test user, sets a permanent password, and authenticates:
+
+```bash
+./scripts/create-test-admin-user.sh dev test-admin@example.com 'Tempp@ssw0rd123!'
+```
+
+A successful run prints an `AuthenticationResult` containing an `IdToken`, `AccessToken`, and `RefreshToken` — the `IdToken` is the JWT the Admin Page would send to the secured API routes. This script is for test/dev verification only (the password is passed as a plain CLI argument); don't reuse a real credential with it.
 
 ## Prerequisites
 

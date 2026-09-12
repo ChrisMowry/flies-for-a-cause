@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment Cognito user pool for administrator
+  authentication. Used by the Admin Page (login) and by the API Gateway JWT
+  authorizer (Epic 1, Story 1.6) to protect the Website Lambda's mutating
+  routes. Supports up to 5 administrator accounts.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Mappings:
+  EnvironmentConfig:
+    dev:
+      # Dev should stay easy to tear down and rebuild.
+      DeletionProtection: INACTIVE
+    prod:
+      # Prod should require a deliberate extra step to delete.
+      DeletionProtection: ACTIVE
+
+Resources:
+  AdminUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "flies-for-a-cause-${Environment}-admins"
+      DeletionProtection: !FindInMap [EnvironmentConfig, !Ref Environment, DeletionProtection]
+      UsernameAttributes:
+        - email
+      AutoVerifiedAttributes:
+        - email
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 12
+          RequireUppercase: true
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          TemporaryPasswordValidityDays: 7
+      # Software-token (authenticator app) MFA is available to admins at no
+      # extra infrastructure cost (unlike SMS MFA, which needs an SNS role).
+      # Optional rather than required, so it doesn't block getting the
+      # first admin test user working end-to-end.
+      MfaConfiguration: OPTIONAL
+      EnabledMfas:
+        - SOFTWARE_TOKEN_MFA
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+      UserPoolTags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  AdminUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub "flies-for-a-cause-${Environment}-admin-client"
+      UserPoolId: !Ref AdminUserPool
+      # Public client (browser SPA): never generate a client secret.
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        # Used by the Admin Page login form (browser-side SRP, password never
+        # sent over the wire).
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        # Used by scripts/create-test-admin-user.sh to verify authentication
+        # end-to-end without implementing SRP in a shell script.
+        - ALLOW_ADMIN_USER_PASSWORD_AUTH
+      PreventUserExistenceErrors: ENABLED
+      AccessTokenValidity: 1
+      IdTokenValidity: 1
+      RefreshTokenValidity: 30
+      TokenValidityUnits:
+        AccessToken: hours
+        IdToken: hours
+        RefreshToken: days
+
+  # Exposes the pool/client IDs to the UI build (Story 1.11) the same way
+  # base.yaml exposes the domain names, so the React app can be configured
+  # per environment without hardcoding these values.
+  CognitoUserPoolIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/cognito/user-pool-id"
+      Type: String
+      Value: !Ref AdminUserPool
+      Description: Cognito user pool ID for admin authentication.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  CognitoUserPoolClientIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/cognito/user-pool-client-id"
+      Type: String
+      Value: !Ref AdminUserPoolClient
+      Description: Cognito app client ID for admin authentication.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+Outputs:
+  UserPoolId:
+    Description: The Cognito user pool ID.
+    Value: !Ref AdminUserPool
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-CognitoUserPoolId"
+
+  UserPoolArn:
+    Description: The Cognito user pool ARN (for the API Gateway JWT authorizer).
+    Value: !GetAtt AdminUserPool.Arn
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-CognitoUserPoolArn"
+
+  UserPoolClientId:
+    Description: The Cognito app client ID used by the Admin Page and test scripts.
+    Value: !Ref AdminUserPoolClient
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-CognitoUserPoolClientId"
