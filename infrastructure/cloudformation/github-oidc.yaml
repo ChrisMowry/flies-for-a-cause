@@ -1,0 +1,30 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - GitHub Actions OIDC identity provider. Like
+  dns-zone.yaml, this is a single global resource (an AWS account can only
+  have one OIDC provider per issuer URL), deployed once, ever, not per
+  environment. Lets GitHub Actions workflow runs assume the per-environment
+  deploy roles in deploy-role.yaml via short-lived, per-run credentials,
+  instead of long-lived AWS access keys stored as GitHub secrets. Deploy
+  this before deploy-role.yaml.
+
+Resources:
+  GitHubOidcProvider:
+    Type: AWS::IAM::OIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList:
+        - sts.amazonaws.com
+      # GitHub's OIDC token-signing certificate thumbprint. AWS no longer
+      # validates this value against the actual certificate (STS validates
+      # the token against GitHub's published JWKS instead), but the
+      # provider resource still requires a value to be supplied.
+      ThumbprintList:
+        - 6938fd4d98bab03faadb97b34396831e3780aea1
+
+Outputs:
+  OidcProviderArn:
+    Description: The GitHub Actions OIDC provider ARN, referenced by deploy-role.yaml's trust policy.
+    Value: !Ref GitHubOidcProvider
+    Export:
+      Name: flies-for-a-cause-GitHubOidcProviderArn

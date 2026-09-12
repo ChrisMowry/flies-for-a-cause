@@ -1,0 +1,183 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment IAM role assumed by the GitHub
+  Actions CI/CD pipeline (Story 1.10) via OIDC federation, instead of
+  long-lived AWS access keys stored as GitHub secrets. Scoped so the dev
+  role can only be assumed by workflow runs on the develop branch, and the
+  prod role only by runs on main. Depends on github-oidc.yaml having
+  already been deployed.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+  GitHubRepository:
+    Type: String
+    Description: The GitHub repository this role trusts, as "owner/repo".
+    Default: ChrisMowry/flies-for-a-cause
+
+Mappings:
+  EnvironmentConfig:
+    dev:
+      TrustedBranch: develop
+    prod:
+      TrustedBranch: main
+
+Resources:
+  GitHubActionsDeployRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "flies-for-a-cause-${Environment}-github-actions-deploy-role"
+      Description: !Sub "Assumed by GitHub Actions to deploy the ${Environment} environment's CloudFormation stacks."
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !ImportValue flies-for-a-cause-GitHubOidcProviderArn
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                token.actions.githubusercontent.com:sub: !Sub
+                  - "repo:${GitHubRepository}:ref:refs/heads/${TrustedBranch}"
+                  - TrustedBranch: !FindInMap [EnvironmentConfig, !Ref Environment, TrustedBranch]
+      Policies:
+        - PolicyName: FliesForACauseDeployPermissions
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # CloudFormation itself: most of its API surface (change sets,
+              # ValidateTemplate, GetTemplateSummary, ListStacks, ...) doesn't
+              # support meaningful resource-level scoping, so real blast-radius
+              # control comes from scoping the underlying service statements
+              # below instead.
+              - Sid: CloudFormation
+                Effect: Allow
+                Action: cloudformation:*
+                Resource: "*"
+
+              - Sid: S3Website
+                Effect: Allow
+                Action: s3:*
+                Resource:
+                  - "arn:aws:s3:::flies-for-a-cause-*"
+                  - "arn:aws:s3:::flies-for-a-cause-*/*"
+
+              # CloudFront, Route53, and ACM don't expose ARNs that can be
+              # scoped to this project's naming convention ahead of time
+              # (e.g. a Route53 hosted zone ID is only known after the zone
+              # is first created), so these are granted at the service level.
+              - Sid: CloudFront
+                Effect: Allow
+                Action: cloudfront:*
+                Resource: "*"
+              - Sid: Route53
+                Effect: Allow
+                Action: route53:*
+                Resource: "*"
+              - Sid: AcmCertificates
+                Effect: Allow
+                Action: acm:*
+                Resource: "*"
+              - Sid: Cognito
+                Effect: Allow
+                Action: cognito-idp:*
+                Resource: "*"
+              - Sid: ApiGateway
+                Effect: Allow
+                Action: apigateway:*
+                Resource: "*"
+
+              - Sid: Lambda
+                Effect: Allow
+                Action: lambda:*
+                Resource: !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:flies-for-a-cause-*"
+
+              - Sid: Sqs
+                Effect: Allow
+                Action: sqs:*
+                Resource: !Sub "arn:aws:sqs:*:${AWS::AccountId}:flies-for-a-cause-*"
+
+              - Sid: Sns
+                Effect: Allow
+                Action: sns:*
+                Resource: !Sub "arn:aws:sns:*:${AWS::AccountId}:flies-for-a-cause-*"
+
+              - Sid: EventBridge
+                Effect: Allow
+                Action: events:*
+                Resource: !Sub "arn:aws:events:*:${AWS::AccountId}:rule/flies-for-a-cause-*"
+
+              - Sid: CloudWatchLogs
+                Effect: Allow
+                Action: logs:*
+                Resource:
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/flies-for-a-cause/*"
+                  - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/lambda/flies-for-a-cause-*"
+
+              - Sid: SsmParameters
+                Effect: Allow
+                Action: ssm:*
+                Resource: !Sub "arn:aws:ssm:*:${AWS::AccountId}:parameter/flies-for-a-cause/*"
+
+              # IAM is the highest-risk grant here, so it's restricted to
+              # managing only resources following this project's naming
+              # convention, rather than iam:* on "*".
+              - Sid: IamManagement
+                Effect: Allow
+                Action:
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:GetRole
+                  - iam:UpdateRole
+                  - iam:UpdateAssumeRolePolicy
+                  - iam:TagRole
+                  - iam:UntagRole
+                  - iam:PutRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:GetRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DetachRolePolicy
+                  - iam:ListRolePolicies
+                  - iam:ListAttachedRolePolicies
+                  - iam:CreatePolicy
+                  - iam:DeletePolicy
+                  - iam:GetPolicy
+                  - iam:GetPolicyVersion
+                  - iam:ListPolicyVersions
+                  - iam:CreatePolicyVersion
+                  - iam:DeletePolicyVersion
+                  - iam:TagPolicy
+                  - iam:UntagPolicy
+                Resource:
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:role/flies-for-a-cause-*"
+                  - !Sub "arn:aws:iam::${AWS::AccountId}:policy/flies-for-a-cause-*"
+
+              - Sid: IamPassRoleForLambda
+                Effect: Allow
+                Action: iam:PassRole
+                Resource: !Sub "arn:aws:iam::${AWS::AccountId}:role/flies-for-a-cause-*"
+                Condition:
+                  StringEquals:
+                    iam:PassedToService: lambda.amazonaws.com
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  DeployRoleArn:
+    Description: The role ARN GitHub Actions assumes to deploy this environment.
+    Value: !GetAtt GitHubActionsDeployRole.Arn
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-GitHubActionsDeployRoleArn"

@@ -1,0 +1,106 @@
+name: Deploy Infrastructure
+
+# Story 1.10: deploys CloudFormation changes on merge to the appropriate
+# branch - develop -> the dev environment, main -> prod (gated behind the
+# "prod" GitHub Environment's required reviewer). Excludes dns-zone.yaml,
+# github-oidc.yaml, and deploy-role.yaml: those are one-time/global
+# bootstrap stacks deployed manually once per account (see
+# infrastructure/README.md) - the pipeline can't deploy the very role it
+# needs in order to run.
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - "infrastructure/cloudformation/**"
+      - "infrastructure/scripts/**"
+      - ".github/workflows/deploy-infrastructure.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # required to assume the deploy role via OIDC
+
+jobs:
+  deploy-dev:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    environment: dev
+    defaults:
+      run:
+        working-directory: infrastructure
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy dev stacks
+        run: |
+          set -euo pipefail
+          bash ./scripts/deploy-stack.sh dev base
+          bash ./scripts/deploy-stack.sh dev certificates
+          bash ./scripts/deploy-stack.sh dev cognito
+          bash ./scripts/deploy-stack.sh dev hosting
+          bash ./scripts/deploy-stack.sh dev api-gateway
+          bash ./scripts/deploy-stack.sh dev dns-records
+          bash ./scripts/deploy-stack.sh dev social-media-queue
+          bash ./scripts/deploy-stack.sh dev scraper-schedule
+          bash ./scripts/deploy-stack.sh dev notifications "AdminEmail=${{ vars.ADMIN_EMAIL }}"
+
+      # CloudFormation itself rolls a failed update back automatically; this
+      # step's only job is making sure a failure doesn't go unnoticed.
+      # GitHub also emails failed-workflow notifications by default, so this
+      # is a second, more prominent channel via the project's own alerting.
+      - name: Notify admin on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-notifications \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+          aws sns publish --topic-arn "${TOPIC_ARN}" \
+            --subject "Flies for a Cause - dev infrastructure deploy failed" \
+            --message "Workflow run ${{ github.run_id }} failed deploying dev infrastructure from commit ${{ github.sha }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # The "prod" GitHub Environment requires approval from a reviewer before
+    # this job is allowed to run - see infrastructure/README.md.
+    environment: prod
+    defaults:
+      run:
+        working-directory: infrastructure
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Deploy prod stacks
+        run: |
+          set -euo pipefail
+          bash ./scripts/deploy-stack.sh prod base
+          bash ./scripts/deploy-stack.sh prod certificates
+          bash ./scripts/deploy-stack.sh prod cognito
+          bash ./scripts/deploy-stack.sh prod hosting
+          bash ./scripts/deploy-stack.sh prod api-gateway
+          bash ./scripts/deploy-stack.sh prod dns-records
+          bash ./scripts/deploy-stack.sh prod social-media-queue
+          bash ./scripts/deploy-stack.sh prod scraper-schedule
+          bash ./scripts/deploy-stack.sh prod notifications "AdminEmail=${{ vars.ADMIN_EMAIL }}"
+
+      - name: Notify admin on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-prod-notifications \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+          aws sns publish --topic-arn "${TOPIC_ARN}" \
+            --subject "Flies for a Cause - PROD infrastructure deploy failed" \
+            --message "Workflow run ${{ github.run_id }} failed deploying PROD infrastructure from commit ${{ github.sha }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
