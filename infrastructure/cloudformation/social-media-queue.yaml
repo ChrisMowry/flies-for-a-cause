@@ -1,0 +1,140 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment social media post queue. The Social
+  Media Scraper Lambda (Epic 7) sends scraped posts here; the Social Media
+  Post Processor Lambda (Epic 8) consumes them. Also provisions a
+  dead-letter queue for messages that repeatedly fail processing, and two
+  standalone IAM managed policies scoping send vs. receive/delete access,
+  ready to attach to those Lambdas' execution roles once Epic 7/8 create
+  them.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  SocialMediaPostDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "flies-for-a-cause-${Environment}-social-media-post-queue-dlq.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: false
+      SqsManagedSseEnabled: true
+      # Keep failed messages around longer than the main queue's default so
+      # there's time to investigate before they age out.
+      MessageRetentionPeriod: 1209600 # 14 days (SQS maximum)
+      RedriveAllowPolicy:
+        redrivePermission: byQueue
+        sourceQueueArns:
+          # Referenced by literal ARN (not !GetAtt) to avoid a circular
+          # dependency with SocialMediaPostQueue, which in turn references
+          # this queue's ARN in its own RedrivePolicy.
+          - !Sub "arn:aws:sqs:${AWS::Region}:${AWS::AccountId}:flies-for-a-cause-${Environment}-social-media-post-queue.fifo"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  SocialMediaPostQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "flies-for-a-cause-${Environment}-social-media-post-queue.fifo"
+      FifoQueue: true
+      # The scraper assigns an explicit MessageDeduplicationId derived from
+      # the post link (Epic 7, Story 7.6) rather than relying on content
+      # hashing, since two edits of the same post shouldn't dedupe away.
+      ContentBasedDeduplication: false
+      SqsManagedSseEnabled: true
+      MessageRetentionPeriod: 345600 # 4 days
+      # Should cover the processor Lambda's expected worst-case processing
+      # time (LLM calls, comment pagination); revisit alongside that
+      # Lambda's own timeout in Epic 8.
+      VisibilityTimeout: 120
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt SocialMediaPostDeadLetterQueue.Arn
+        maxReceiveCount: 5
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Attach to the Social Media Scraper Lambda's execution role (Epic 7).
+  ScraperQueueSendPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "flies-for-a-cause-${Environment}-scraper-queue-send-policy"
+      Description: Grants send-only access to the social media post queue, for the Social Media Scraper Lambda.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:SendMessage
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+            Resource: !GetAtt SocialMediaPostQueue.Arn
+
+  # Attach to the Social Media Post Processor Lambda's execution role
+  # (Epic 8), typically via an SQS event source mapping.
+  ProcessorQueueReceivePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "flies-for-a-cause-${Environment}-processor-queue-receive-policy"
+      Description: Grants receive/delete access to the social media post queue, for the Social Media Post Processor Lambda.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - sqs:ReceiveMessage
+              - sqs:DeleteMessage
+              - sqs:GetQueueAttributes
+              - sqs:ChangeMessageVisibility
+            Resource: !GetAtt SocialMediaPostQueue.Arn
+
+Outputs:
+  QueueUrl:
+    Description: The social media post queue URL.
+    Value: !Ref SocialMediaPostQueue
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-SocialMediaPostQueueUrl"
+
+  QueueArn:
+    Description: The social media post queue ARN.
+    Value: !GetAtt SocialMediaPostQueue.Arn
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-SocialMediaPostQueueArn"
+
+  DeadLetterQueueUrl:
+    Description: The social media post dead-letter queue URL.
+    Value: !Ref SocialMediaPostDeadLetterQueue
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-SocialMediaPostDeadLetterQueueUrl"
+
+  DeadLetterQueueArn:
+    Description: The social media post dead-letter queue ARN.
+    Value: !GetAtt SocialMediaPostDeadLetterQueue.Arn
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-SocialMediaPostDeadLetterQueueArn"
+
+  ScraperQueueSendPolicyArn:
+    Description: Managed policy ARN granting send access to the queue - attach to the scraper Lambda's role.
+    Value: !Ref ScraperQueueSendPolicy
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ScraperQueueSendPolicyArn"
+
+  ProcessorQueueReceivePolicyArn:
+    Description: Managed policy ARN granting receive/delete access to the queue - attach to the processor Lambda's role.
+    Value: !Ref ProcessorQueueReceivePolicy
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ProcessorQueueReceivePolicyArn"
