@@ -25,6 +25,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `api-gateway.yaml` | Per-environment HTTP API Gateway: the stable HTTPS endpoint the UI calls, a Cognito JWT authorizer ready for secured routes, and a placeholder Lambda + two test routes (`GET /health` public, `GET /health/secure` JWT-protected) proving the whole chain works. Epic 3 adds the real Lambda/routes to this same API. |
 | `dns-records.yaml` | Per-environment Route53 alias records pointing the website domain (`flies-for-a-cause.org` / `dev.flies-for-a-cause.org`) at its CloudFront distribution, and the API domain (`api.` / `dev-api.`) at its API Gateway custom domain. |
 | `social-media-queue.yaml` | Per-environment `social-media-post-queue.fifo` SQS queue (+ dead-letter queue) connecting the Social Media Scraper Lambda (Epic 7) to the Social Media Post Processor Lambda (Epic 8), plus two standalone IAM managed policies scoping send vs. receive/delete access for those Lambdas' future execution roles. Has no dependencies on any other template — deployable independently, any time. |
+| `scraper-schedule.yaml` | Per-environment EventBridge rule firing every 5 minutes for the Social Media Scraper Lambda (Epic 7), plus a placeholder Lambda target proving the invoke wiring works. `ScheduleState` (`ENABLED`/`DISABLED`, default `DISABLED`) can be overridden independently per environment. Has no dependencies on any other template. |
 
 ## Deploying and deleting a stack
 
@@ -41,7 +42,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 
 Both scripts derive the stack name from the environment and template name, so deploying and deleting a given environment's stacks is fully scripted — no manual cleanup steps in the AWS Console are required.
 
-Additional `--parameter-overrides key=value` pairs can be appended to `deploy-stack.sh` for templates that take more than the `Environment` parameter.
+For templates that take more than the `Environment` parameter, append additional bare `key=value` pairs after the template name (the script already passes `--parameter-overrides` once; don't repeat that flag) — e.g. `./scripts/deploy-stack.sh dev scraper-schedule ScheduleState=ENABLED`.
 
 `dns-zone.yaml` is the one exception: since it's not per-environment, it doesn't fit `deploy-stack.sh`'s `<env> <template-name>` convention and is deployed directly instead:
 
@@ -67,7 +68,7 @@ Later templates import values (domain names, certificate ARNs, the hosted zone I
 
 Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
 
-`social-media-queue.yaml <env>` has no dependencies on any other template (it doesn't import anything) and can be deployed or deleted at any point, independent of everything above.
+`social-media-queue.yaml <env>` and `scraper-schedule.yaml <env>` have no dependencies on any other template (neither imports anything) and can each be deployed or deleted at any point, independent of everything above and of each other.
 
 ## Verifying the website hosting stack
 
@@ -169,6 +170,24 @@ aws sqs delete-message --queue-url "${QUEUE_URL}" --receipt-handle "${RECEIPT_HA
 ```
 
 `get-queue-attributes` should show a `RedrivePolicy` pointing at the dead-letter queue's ARN with `maxReceiveCount: 5`. The scoped `ScraperQueueSendPolicyArn` / `ProcessorQueueReceivePolicyArn` outputs aren't attached to anything yet — Epic 7 and Epic 8 attach them to the scraper and processor Lambdas' execution roles, respectively, once those roles exist.
+
+## Verifying the scraper schedule
+
+After deploying `scraper-schedule.yaml`, confirm the rule invokes its placeholder Lambda target on schedule, and that it can be toggled independently per environment:
+
+```bash
+# Deploy the schedule for dev, enabled so it can be observed firing
+./scripts/deploy-stack.sh dev scraper-schedule ScheduleState=ENABLED
+
+# Wait a little over 5 minutes, then check for an invocation log line
+aws logs tail "/aws/lambda/flies-for-a-cause-dev-scraper-stub" --since 6m
+
+# Confirm the rule's enabled/disabled state independently of prod
+aws events describe-rule --name flies-for-a-cause-dev-scraper-schedule --query State
+aws events describe-rule --name flies-for-a-cause-prod-scraper-schedule --query State
+```
+
+A successful check shows a `"Scraper schedule stub invoked"` log line roughly every 5 minutes while `ScheduleState=ENABLED`, and the dev/prod rules reporting independent `State` values. Once verified, redeploy with `ScheduleState=DISABLED` (the default) to avoid unnecessary invocations until Epic 7's real scraper Lambda replaces the stub.
 
 ## Prerequisites
 

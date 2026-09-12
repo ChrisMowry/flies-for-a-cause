@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment EventBridge schedule for the Social
+  Media Scraper Lambda (Epic 7). Includes a placeholder Lambda target so
+  the schedule -> invoke wiring can be proven end-to-end before that Lambda
+  exists; Epic 7 points the rule's target at the real scraper Lambda and
+  this stub can be removed. Has no dependencies on any other template.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+  ScheduleState:
+    Type: String
+    Description: >
+      Whether the schedule rule is enabled or disabled. Defaults to DISABLED
+      in both environments to avoid unnecessary Instagram API calls/costs
+      until the real scraper Lambda exists and you're ready for it to run
+      automatically. Override independently per environment, e.g.
+      --parameter-overrides ScheduleState=ENABLED for prod only.
+    AllowedValues:
+      - ENABLED
+      - DISABLED
+    Default: DISABLED
+
+Resources:
+  # --- Placeholder Lambda -------------------------------------------------
+  # Proves the EventBridge -> Lambda invoke wiring works end-to-end.
+  # Replaced by the real Social Media Scraper Lambda in Epic 7.
+  StubScraperFunctionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "flies-for-a-cause-${Environment}-scraper-stub-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  StubScraperFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "flies-for-a-cause-${Environment}-scraper-stub"
+      Description: Placeholder EventBridge target for Story 1.8 verification. Superseded by the Social Media Scraper Lambda in Epic 7.
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Role: !GetAtt StubScraperFunctionRole.Arn
+      Timeout: 5
+      MemorySize: 128
+      Code:
+        ZipFile: |
+          exports.handler = async (event) => {
+            console.log("Scraper schedule stub invoked", JSON.stringify(event));
+            return { invoked: true, time: event.time || null };
+          };
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # --- Schedule ------------------------------------------------------------
+  # Note: AWS::Events::Rule has no reliable native Tags property across CFN
+  # versions, so (unlike other resources in this project) this rule is left
+  # untagged; its name still carries the environment for identification.
+  ScraperScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "flies-for-a-cause-${Environment}-scraper-schedule"
+      Description: !Sub "Triggers the Social Media Scraper Lambda every 5 minutes for ${Environment}."
+      ScheduleExpression: "rate(5 minutes)"
+      State: !Ref ScheduleState
+      Targets:
+        - Id: ScraperFunctionTarget
+          Arn: !GetAtt StubScraperFunction.Arn
+
+  ScraperFunctionInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref StubScraperFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScraperScheduleRule.Arn
+
+Outputs:
+  ScheduleRuleArn:
+    Description: The EventBridge rule ARN for the scraper schedule.
+    Value: !GetAtt ScraperScheduleRule.Arn
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ScraperScheduleRuleArn"
+
+  ScheduleRuleName:
+    Description: The EventBridge rule name for the scraper schedule.
+    Value: !Ref ScraperScheduleRule
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ScraperScheduleRuleName"
