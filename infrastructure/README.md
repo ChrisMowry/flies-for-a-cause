@@ -24,6 +24,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `cognito.yaml` | Per-environment Cognito user pool + app client for admin authentication (up to 5 administrators), used by the Admin Page login and the API Gateway JWT authorizer. Pool/client IDs are exposed via SSM parameters for the UI build. Independent of the DNS/certificate/hosting chain — only depends on `base.yaml`. |
 | `api-gateway.yaml` | Per-environment HTTP API Gateway: the stable HTTPS endpoint the UI calls, a Cognito JWT authorizer ready for secured routes, and a placeholder Lambda + two test routes (`GET /health` public, `GET /health/secure` JWT-protected) proving the whole chain works. Epic 3 adds the real Lambda/routes to this same API. |
 | `dns-records.yaml` | Per-environment Route53 alias records pointing the website domain (`flies-for-a-cause.org` / `dev.flies-for-a-cause.org`) at its CloudFront distribution, and the API domain (`api.` / `dev-api.`) at its API Gateway custom domain. |
+| `social-media-queue.yaml` | Per-environment `social-media-post-queue.fifo` SQS queue (+ dead-letter queue) connecting the Social Media Scraper Lambda (Epic 7) to the Social Media Post Processor Lambda (Epic 8), plus two standalone IAM managed policies scoping send vs. receive/delete access for those Lambdas' future execution roles. Has no dependencies on any other template — deployable independently, any time. |
 
 ## Deploying and deleting a stack
 
@@ -65,6 +66,8 @@ Later templates import values (domain names, certificate ARNs, the hosted zone I
 7. `dns-records.yaml <env>` (needs `hosting.yaml` and `api-gateway.yaml`)
 
 Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
+
+`social-media-queue.yaml <env>` has no dependencies on any other template (it doesn't import anything) and can be deployed or deleted at any point, independent of everything above.
 
 ## Verifying the website hosting stack
 
@@ -143,6 +146,29 @@ curl -s "https://dev-api.flies-for-a-cause.org/health"
 ```
 
 `GET /health` returns `200` with no `Authorization` header. `GET /health/secure` returns `401` without a token and `200` (with `"authenticated": true` and the token's claims) with a valid one — confirming the Cognito JWT authorizer is correctly wired up and ready for Epic 3's real secured routes to use the same pattern.
+
+## Verifying the social media post queue
+
+After deploying `social-media-queue.yaml`, confirm messages can actually flow through the main queue and that the redrive policy points at the dead-letter queue:
+
+```bash
+# Deploy the queue stack for dev
+./scripts/deploy-stack.sh dev social-media-queue
+
+QUEUE_URL=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-social-media-queue \
+  --query "Stacks[0].Outputs[?OutputKey=='QueueUrl'].OutputValue" --output text)
+
+# Send a test message and confirm the redrive policy is attached
+aws sqs send-message --queue-url "${QUEUE_URL}" \
+  --message-body '{"test":true}' --message-group-id test --message-deduplication-id test-1
+aws sqs get-queue-attributes --queue-url "${QUEUE_URL}" --attribute-names RedrivePolicy
+
+# Receive and delete it, proving the full send/receive/delete cycle works
+RECEIPT_HANDLE=$(aws sqs receive-message --queue-url "${QUEUE_URL}" --query "Messages[0].ReceiptHandle" --output text)
+aws sqs delete-message --queue-url "${QUEUE_URL}" --receipt-handle "${RECEIPT_HANDLE}"
+```
+
+`get-queue-attributes` should show a `RedrivePolicy` pointing at the dead-letter queue's ARN with `maxReceiveCount: 5`. The scoped `ScraperQueueSendPolicyArn` / `ProcessorQueueReceivePolicyArn` outputs aren't attached to anything yet — Epic 7 and Epic 8 attach them to the scraper and processor Lambdas' execution roles, respectively, once those roles exist.
 
 ## Prerequisites
 
