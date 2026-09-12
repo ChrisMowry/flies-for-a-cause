@@ -1,0 +1,44 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment Route53 alias records pointing the
+  website domain at its CloudFront distribution. Depends on dns-zone.yaml,
+  base.yaml, and hosting.yaml having already been deployed for this
+  environment.
+
+  Scope note: the api.flies-for-a-cause.org / dev-api.flies-for-a-cause.org
+  records are intentionally NOT created here. They target an API Gateway
+  custom domain resource that doesn't exist until Epic 1, Story 1.6 (API
+  Gateway) is implemented. Add those alias records alongside that story
+  instead of pointing this stack at a resource that doesn't exist yet.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  WebsiteAliasRecordSetGroup:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneId: !ImportValue flies-for-a-cause-dns-HostedZoneId
+      RecordSets:
+        - Name: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDomainName"
+          Type: A
+          AliasTarget:
+            # Fixed hosted zone ID used by every CloudFront distribution, in every account/region.
+            HostedZoneId: Z2FDTNDATAQYW2
+            DNSName: !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDistributionDomainName"
+            EvaluateTargetHealth: false
+        - Name: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDomainName"
+          Type: AAAA
+          AliasTarget:
+            HostedZoneId: Z2FDTNDATAQYW2
+            DNSName: !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDistributionDomainName"
+            EvaluateTargetHealth: false

@@ -3,9 +3,10 @@ Description: >
   Flies for a Cause - static website hosting stack. Provisions a private S3
   bucket for the built UI and a CloudFront distribution in front of it,
   using Origin Access Control so the bucket is never publicly reachable
-  directly. Custom domain/ACM certificate association is added in the
-  Route53 stack (Epic 1, Story 1.4); this stack is reachable via its
-  default *.cloudfront.net domain.
+  directly. The distribution is aliased to its custom domain using the ACM
+  certificate from certificates.yaml, so certificates.yaml (and, before
+  that, dns-zone.yaml and base.yaml) must be deployed for this environment
+  before this stack.
 
 Parameters:
   Environment:
@@ -89,8 +90,14 @@ Resources:
           - ErrorCode: 404
             ResponseCode: 200
             ResponsePagePath: /index.html
+        Aliases:
+          - !ImportValue
+              "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDomainName"
         ViewerCertificate:
-          CloudFrontDefaultCertificate: true
+          AcmCertificateArn: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteCertificateArn"
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
       Tags:
         - Key: Environment
           Value: !Ref Environment
@@ -136,7 +143,7 @@ Outputs:
       Name: !Sub "flies-for-a-cause-${Environment}-WebsiteDistributionId"
 
   WebsiteDistributionDomainName:
-    Description: The default *.cloudfront.net domain name for the website (until a custom domain is mapped in Story 1.4).
+    Description: The distribution's default *.cloudfront.net domain name (the custom domain is aliased to this).
     Value: !GetAtt WebsiteDistribution.DomainName
     Export:
       Name: !Sub "flies-for-a-cause-${Environment}-WebsiteDistributionDomainName"

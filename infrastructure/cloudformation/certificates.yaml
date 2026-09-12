@@ -1,0 +1,67 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment ACM certificates for the website and
+  API custom domains, validated automatically via DNS records in the shared
+  hosted zone. MUST be deployed in us-east-1 - CloudFront (used by
+  hosting.yaml) only accepts certificates from that region, regardless of
+  which region the rest of the stack lives in. Depends on dns-zone.yaml and
+  base.yaml (for the WebsiteDomainName / ApiDomainName exports) having
+  already been deployed for this environment.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  WebsiteCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !ImportValue
+        "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDomainName"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-WebsiteDomainName"
+          HostedZoneId: !ImportValue flies-for-a-cause-dns-HostedZoneId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  ApiCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !ImportValue
+        "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainName"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !ImportValue
+            "Fn::Sub": "flies-for-a-cause-${Environment}-ApiDomainName"
+          HostedZoneId: !ImportValue flies-for-a-cause-dns-HostedZoneId
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  WebsiteCertificateArn:
+    Description: ACM certificate ARN for the website domain (for CloudFront).
+    Value: !Ref WebsiteCertificate
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-WebsiteCertificateArn"
+
+  ApiCertificateArn:
+    Description: ACM certificate ARN for the API domain (for API Gateway).
+    Value: !Ref ApiCertificate
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ApiCertificateArn"
