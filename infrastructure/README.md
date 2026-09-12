@@ -26,6 +26,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `dns-records.yaml` | Per-environment Route53 alias records pointing the website domain (`flies-for-a-cause.org` / `dev.flies-for-a-cause.org`) at its CloudFront distribution, and the API domain (`api.` / `dev-api.`) at its API Gateway custom domain. |
 | `social-media-queue.yaml` | Per-environment `social-media-post-queue.fifo` SQS queue (+ dead-letter queue) connecting the Social Media Scraper Lambda (Epic 7) to the Social Media Post Processor Lambda (Epic 8), plus two standalone IAM managed policies scoping send vs. receive/delete access for those Lambdas' future execution roles. Has no dependencies on any other template — deployable independently, any time. |
 | `scraper-schedule.yaml` | Per-environment EventBridge rule firing every 5 minutes for the Social Media Scraper Lambda (Epic 7), plus a placeholder Lambda target proving the invoke wiring works. `ScheduleState` (`ENABLED`/`DISABLED`, default `DISABLED`) can be overridden independently per environment. Has no dependencies on any other template. |
+| `notifications.yaml` | Per-environment SNS topic the administrator subscribes to (email required, SMS optional) for scam alerts (Epic 8) and future scraper health alarms (Epic 7), plus a standalone IAM managed policy scoping publish access for those Lambdas' future execution roles. Requires the `AdminEmail` parameter. Has no dependencies on any other template. |
 
 ## Deploying and deleting a stack
 
@@ -68,7 +69,7 @@ Later templates import values (domain names, certificate ARNs, the hosted zone I
 
 Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
 
-`social-media-queue.yaml <env>` and `scraper-schedule.yaml <env>` have no dependencies on any other template (neither imports anything) and can each be deployed or deleted at any point, independent of everything above and of each other.
+`social-media-queue.yaml <env>`, `scraper-schedule.yaml <env>`, and `notifications.yaml <env>` have no dependencies on any other template (none of them import anything) and can each be deployed or deleted at any point, independent of everything above and of each other.
 
 ## Verifying the website hosting stack
 
@@ -188,6 +189,28 @@ aws events describe-rule --name flies-for-a-cause-prod-scraper-schedule --query 
 ```
 
 A successful check shows a `"Scraper schedule stub invoked"` log line roughly every 5 minutes while `ScheduleState=ENABLED`, and the dev/prod rules reporting independent `State` values. Once verified, redeploy with `ScheduleState=DISABLED` (the default) to avoid unnecessary invocations until Epic 7's real scraper Lambda replaces the stub.
+
+## Verifying admin notifications
+
+After deploying `notifications.yaml` with your email (and, optionally, phone number), confirm the subscription and that a test alert is actually received:
+
+```bash
+# Deploy the notifications stack for dev - AdminEmail is required, AdminPhoneNumber is optional
+./scripts/deploy-stack.sh dev notifications AdminEmail=you@example.com
+
+TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-notifications \
+  --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+
+# Check subscription status - PendingConfirmation until the confirmation email/SMS is accepted
+aws sns list-subscriptions-by-topic --topic-arn "${TOPIC_ARN}"
+
+# Once confirmed, publish a test alert
+aws sns publish --topic-arn "${TOPIC_ARN}" \
+  --subject "Flies for a Cause - Test Alert" \
+  --message "This is a test of the admin notification channel."
+```
+
+SNS sends a confirmation email (and SMS, if `AdminPhoneNumber` was set) immediately after deploy — **you must open it and confirm the subscription** before any alert is actually delivered; `list-subscriptions-by-topic` shows `PendingConfirmation` until then. A successful check has the test message arriving in your inbox (and/or as a text) after confirming. The `PublishPolicyArn` output isn't attached to anything yet — Epic 8 attaches it to the Social Media Post Processor Lambda's execution role once that Lambda exists.
 
 ## Prerequisites
 

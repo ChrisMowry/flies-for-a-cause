@@ -1,0 +1,93 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment administrator notification channel.
+  An SNS topic the administrator subscribes to (by email, and optionally
+  SMS), used by the Social Media Post Processor Lambda to alert on
+  suspected scams (Epic 8) and by future CloudWatch alarms to alert on
+  scraper Lambda failures (Epic 7). Has no dependencies on any other
+  template.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+  AdminEmail:
+    Type: String
+    Description: >
+      Email address to subscribe to admin notifications. Required - SNS
+      will send this address a confirmation email that must be accepted
+      before notifications are delivered (see the README for details).
+
+  AdminPhoneNumber:
+    Type: String
+    Description: >
+      Optional E.164-format phone number (e.g. +15555550123) to also
+      subscribe via SMS. Leave blank to skip SMS and use email only.
+    Default: ""
+
+Conditions:
+  HasAdminPhoneNumber: !Not [!Equals [!Ref AdminPhoneNumber, ""]]
+
+Resources:
+  AdminNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub "flies-for-a-cause-${Environment}-admin-notifications"
+      DisplayName: !Sub "Flies for a Cause (${Environment}) Alerts"
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  AdminEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AdminNotificationTopic
+      Protocol: email
+      Endpoint: !Ref AdminEmail
+
+  AdminSmsSubscription:
+    Type: AWS::SNS::Subscription
+    Condition: HasAdminPhoneNumber
+    Properties:
+      TopicArn: !Ref AdminNotificationTopic
+      Protocol: sms
+      Endpoint: !Ref AdminPhoneNumber
+
+  # Attach to the Social Media Post Processor Lambda's execution role
+  # (Epic 8) so it can publish scam alerts directly. CloudWatch Alarms
+  # (e.g. Epic 7's scraper health alarm) don't need this - same-account
+  # alarms are allowed to publish to an SNS topic without an explicit
+  # policy.
+  AdminNotificationPublishPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "flies-for-a-cause-${Environment}-admin-notification-publish-policy"
+      Description: Grants permission to publish to the admin notification topic.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource: !Ref AdminNotificationTopic
+
+Outputs:
+  TopicArn:
+    Description: The admin notification SNS topic ARN.
+    Value: !Ref AdminNotificationTopic
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-AdminNotificationTopicArn"
+
+  PublishPolicyArn:
+    Description: Managed policy ARN granting publish access to the topic - attach to Lambdas that need to send alerts.
+    Value: !Ref AdminNotificationPublishPolicy
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-AdminNotificationPublishPolicyArn"
