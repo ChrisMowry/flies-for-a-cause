@@ -1,0 +1,41 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - shared DNS zone. Unlike the other templates in this
+  project, this stack is NOT deployed per-environment: a single public
+  hosted zone covers the apex domain and all of its subdomains (both
+  production and development), so it is deployed exactly once, ever, per
+  AWS account. Deploy this before certificates.yaml or dns-records.yaml.
+
+Parameters:
+  DomainName:
+    Type: String
+    Description: The root domain that this project owns and manages in Route53.
+    Default: flies-for-a-cause.org
+
+Resources:
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+      HostedZoneConfig:
+        Comment: !Sub "Shared hosted zone for all Flies for a Cause environments (${DomainName} and its subdomains)"
+      HostedZoneTags:
+        - Key: Project
+          Value: FliesForACause
+        - Key: ManagedBy
+          Value: CloudFormation
+
+Outputs:
+  HostedZoneId:
+    Description: The Route53 hosted zone ID, shared by all environments.
+    Value: !Ref HostedZone
+    Export:
+      Name: flies-for-a-cause-dns-HostedZoneId
+
+  NameServers:
+    Description: >
+      The name servers assigned to this hosted zone. If flies-for-a-cause.org
+      is registered with a registrar other than Route53, that registrar's NS
+      records must be updated to match these values, or DNS resolution will
+      never reach this zone.
+    Value: !Join [", ", !GetAtt HostedZone.NameServers]

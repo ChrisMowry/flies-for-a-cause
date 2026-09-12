@@ -4,7 +4,7 @@ All AWS resources for **Flies for a Cause** are defined as CloudFormation templa
 
 ## Environments
 
-Every template accepts an `Environment` parameter with allowed values `dev` and `prod`. Each environment is a fully separate, independently deployable set of stacks — nothing is shared between them.
+Every template accepts an `Environment` parameter with allowed values `dev` and `prod`, **except `dns-zone.yaml`**. A Route53 hosted zone covers the apex domain and all of its subdomains (production and development alike), so it is a single global stack deployed once, ever, per AWS account — not per environment. Every other stack is a fully separate, independently deployable set of resources per environment — nothing else is shared between dev and prod.
 
 ## Conventions
 
@@ -18,7 +18,10 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | Template | Purpose |
 | --- | --- |
 | `base.yaml` | Foundational per-environment stack: shared SSM configuration parameters and the shared application log group. Deploy this first for a new environment. |
-| `hosting.yaml` | Static website hosting: a private S3 bucket (holding the built UI) behind a CloudFront distribution using Origin Access Control, so the bucket is never reachable directly. Reachable via its default `*.cloudfront.net` domain until Story 1.4 maps a custom domain to it. |
+| `dns-zone.yaml` | The single, global Route53 hosted zone for `flies-for-a-cause.org`. Deployed once, ever (not per environment) — see [Environments](#environments). Deploy before `certificates.yaml` or `dns-records.yaml`. |
+| `certificates.yaml` | Per-environment ACM certificates for the website and API custom domains, DNS-validated automatically against the shared hosted zone. **Must be deployed in `us-east-1`** regardless of the project's overall region, because CloudFront only accepts certificates from that region. |
+| `hosting.yaml` | Static website hosting: a private S3 bucket (holding the built UI) behind a CloudFront distribution using Origin Access Control, so the bucket is never reachable directly. Aliased to its custom domain using the certificate from `certificates.yaml`. |
+| `dns-records.yaml` | Per-environment Route53 alias records pointing the website domain (`flies-for-a-cause.org` / `dev.flies-for-a-cause.org`) at its CloudFront distribution. The API domain records (`api.` / `dev-api.`) are added alongside Story 1.6 (API Gateway), once that custom domain resource exists. |
 
 ## Deploying and deleting a stack
 
@@ -36,6 +39,28 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 Both scripts derive the stack name from the environment and template name, so deploying and deleting a given environment's stacks is fully scripted — no manual cleanup steps in the AWS Console are required.
 
 Additional `--parameter-overrides key=value` pairs can be appended to `deploy-stack.sh` for templates that take more than the `Environment` parameter.
+
+`dns-zone.yaml` is the one exception: since it's not per-environment, it doesn't fit `deploy-stack.sh`'s `<env> <template-name>` convention and is deployed directly instead:
+
+```bash
+# Deploy once, ever, per AWS account
+aws cloudformation deploy \
+  --stack-name flies-for-a-cause-dns-zone \
+  --template-file cloudformation/dns-zone.yaml \
+  --tags Project=FliesForACause ManagedBy=CloudFormation
+```
+
+### Deployment order for a new environment
+
+Later templates import values (domain names, certificate ARNs, the hosted zone ID) exported by earlier ones, so they must be deployed in this order the first time an environment is stood up:
+
+1. `dns-zone.yaml` (only if not already deployed — it's global, see above)
+2. `base.yaml <env>`
+3. `certificates.yaml <env>` — **in `us-east-1`**
+4. `hosting.yaml <env>` (or its update, once a certificate exists)
+5. `dns-records.yaml <env>`
+
+Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
 
 ## Verifying the website hosting stack
 
@@ -59,6 +84,24 @@ curl -I "https://${DISTRIBUTION_DOMAIN}/"
 ```
 
 A successful check returns `HTTP/2 200` from the CloudFront domain. Requesting the same object directly from the bucket's URL should be denied (`403 Forbidden`), confirming the bucket isn't publicly reachable outside of CloudFront.
+
+## Verifying domains and certificates
+
+Once `dns-zone.yaml`, `certificates.yaml`, and the domain-aliased `hosting.yaml` are deployed for an environment (see deployment order above):
+
+```bash
+# Confirm both certificates issued (DNS validation can take several minutes)
+aws acm list-certificates --region us-east-1 \
+  --query "CertificateSummaryList[?contains(DomainName, 'flies-for-a-cause.org')]"
+
+# Deploy the website's Route53 alias record
+./scripts/deploy-stack.sh dev dns-records
+
+# Confirm the custom domain resolves and serves over HTTPS
+curl -I "https://dev.flies-for-a-cause.org/"
+```
+
+A successful check returns `HTTP/2 200` from the custom domain directly (no `*.cloudfront.net` in the URL), confirming the hosted zone, certificate, and CloudFront alias are all wired together correctly. The `api.` / `dev-api.` records aren't part of this check yet — see the scope note in `dns-records.yaml` and Story 1.6.
 
 ## Prerequisites
 
