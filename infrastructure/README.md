@@ -4,7 +4,7 @@ All AWS resources for **Flies for a Cause** are defined as CloudFormation templa
 
 ## Environments
 
-Every template accepts an `Environment` parameter with allowed values `dev` and `prod`, **except `dns-zone.yaml`**. A Route53 hosted zone covers the apex domain and all of its subdomains (production and development alike), so it is a single global stack deployed once, ever, per AWS account — not per environment. Every other stack is a fully separate, independently deployable set of resources per environment — nothing else is shared between dev and prod.
+Every template accepts an `Environment` parameter with allowed values `dev` and `prod`, **except `dns-zone.yaml` and `github-oidc.yaml`**. A Route53 hosted zone covers the apex domain and all of its subdomains (production and development alike), and an AWS account can only have one OIDC provider per issuer URL, so both are single global stacks deployed once, ever, per AWS account — not per environment. Every other stack is a fully separate, independently deployable set of resources per environment — nothing else is shared between dev and prod.
 
 ## Conventions
 
@@ -27,6 +27,8 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `social-media-queue.yaml` | Per-environment `social-media-post-queue.fifo` SQS queue (+ dead-letter queue) connecting the Social Media Scraper Lambda (Epic 7) to the Social Media Post Processor Lambda (Epic 8), plus two standalone IAM managed policies scoping send vs. receive/delete access for those Lambdas' future execution roles. Has no dependencies on any other template — deployable independently, any time. |
 | `scraper-schedule.yaml` | Per-environment EventBridge rule firing every 5 minutes for the Social Media Scraper Lambda (Epic 7), plus a placeholder Lambda target proving the invoke wiring works. `ScheduleState` (`ENABLED`/`DISABLED`, default `DISABLED`) can be overridden independently per environment. Has no dependencies on any other template. |
 | `notifications.yaml` | Per-environment SNS topic the administrator subscribes to (email required, SMS optional) for scam alerts (Epic 8) and future scraper health alarms (Epic 7), plus a standalone IAM managed policy scoping publish access for those Lambdas' future execution roles. Requires the `AdminEmail` parameter. Has no dependencies on any other template. |
+| `github-oidc.yaml` | The single, global GitHub Actions OIDC identity provider. Deployed once, ever (not per environment), like `dns-zone.yaml` — see [Environments](#environments). Deploy before `deploy-role.yaml`. |
+| `deploy-role.yaml` | Per-environment IAM role the GitHub Actions CI/CD pipeline assumes via OIDC to deploy that environment — scoped so the `dev` role only trusts workflow runs on the `develop` branch, and `prod` only trusts `main`. See [CI/CD Pipeline](#cicd-pipeline). |
 
 ## Deploying and deleting a stack
 
@@ -45,13 +47,19 @@ Both scripts derive the stack name from the environment and template name, so de
 
 For templates that take more than the `Environment` parameter, append additional bare `key=value` pairs after the template name (the script already passes `--parameter-overrides` once; don't repeat that flag) — e.g. `./scripts/deploy-stack.sh dev scraper-schedule ScheduleState=ENABLED`.
 
-`dns-zone.yaml` is the one exception: since it's not per-environment, it doesn't fit `deploy-stack.sh`'s `<env> <template-name>` convention and is deployed directly instead:
+`dns-zone.yaml` and `github-oidc.yaml` are the exceptions: since neither is per-environment, they don't fit `deploy-stack.sh`'s `<env> <template-name>` convention and are deployed directly instead:
 
 ```bash
 # Deploy once, ever, per AWS account
 aws cloudformation deploy \
   --stack-name flies-for-a-cause-dns-zone \
   --template-file cloudformation/dns-zone.yaml \
+  --tags Project=FliesForACause ManagedBy=CloudFormation
+
+aws cloudformation deploy \
+  --stack-name flies-for-a-cause-github-oidc \
+  --template-file cloudformation/github-oidc.yaml \
+  --capabilities CAPABILITY_IAM \
   --tags Project=FliesForACause ManagedBy=CloudFormation
 ```
 
@@ -70,6 +78,29 @@ Later templates import values (domain names, certificate ARNs, the hosted zone I
 Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
 
 `social-media-queue.yaml <env>`, `scraper-schedule.yaml <env>`, and `notifications.yaml <env>` have no dependencies on any other template (none of them import anything) and can each be deployed or deleted at any point, independent of everything above and of each other.
+
+## CI/CD Pipeline
+
+`.github/workflows/deploy-infrastructure.yml` deploys the per-environment templates automatically: a push to `develop` deploys everything to `dev`, and a push to `main` deploys to `prod`. It authenticates to AWS via GitHub's OIDC federation (short-lived, per-run credentials) rather than long-lived access keys stored as secrets, and excludes the one-time/global bootstrap stacks below (`dns-zone.yaml`, `github-oidc.yaml`, `deploy-role.yaml`) — those are deployed manually, once, since the pipeline can't deploy the very role it needs in order to run.
+
+### One-time bootstrap (per AWS account/environment)
+
+1. Deploy `dns-zone.yaml` and `github-oidc.yaml` directly, as shown above (once per account).
+2. Deploy `deploy-role.yaml` for each environment: `./scripts/deploy-stack.sh dev deploy-role` and `./scripts/deploy-stack.sh prod deploy-role`.
+3. In the repo's GitHub Environments (**Settings → Environments**), set two variables on **both** the `dev` and `prod` environments:
+   - `AWS_DEPLOY_ROLE_ARN` — the `DeployRoleArn` output from that environment's `deploy-role.yaml` stack.
+   - `ADMIN_EMAIL` — the address `notifications.yaml` should subscribe (matches what you'd otherwise pass as `AdminEmail=...`).
+
+### Already configured in this repository
+
+The `dev` and `prod` GitHub Environments themselves (referenced by the workflow's `environment:` key) already exist, with:
+
+- `prod` requiring approval from a reviewer before its job runs — this is the "approval gate" for production deploys. Add or change reviewers under **Settings → Environments → prod → Required reviewers**.
+- Each environment restricted to its matching branch (`dev` → `develop`, `prod` → `main`) as a second, GitHub-enforced check alongside the workflow's own `if: github.ref == ...` condition.
+
+### Failure handling
+
+A failed deploy doesn't leave a stack half-updated — CloudFormation automatically rolls a failed update back on its own. To make sure a failure doesn't go unnoticed, each job's last step (on failure) publishes to that environment's `notifications.yaml` SNS topic, in addition to GitHub's own default failed-workflow email.
 
 ## Verifying the website hosting stack
 
