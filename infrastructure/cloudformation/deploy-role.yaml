@@ -4,8 +4,12 @@ Description: >
   Actions CI/CD pipeline (Story 1.10) via OIDC federation, instead of
   long-lived AWS access keys stored as GitHub secrets. Scoped so the dev
   role can only be assumed by workflow runs on the develop branch, and the
-  prod role only by runs on main. Depends on github-oidc.yaml having
-  already been deployed.
+  prod role only by runs on main. Trusts the account's GitHub Actions OIDC
+  provider by its well-known ARN rather than importing github-oidc.yaml's
+  export, since AWS allows only one such provider per account and this
+  project may share it with other projects already using that account -
+  deploy github-oidc.yaml first only if the account doesn't already have
+  one.
 
 Parameters:
   Environment:
@@ -39,7 +43,7 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !ImportValue flies-for-a-cause-GitHubOidcProviderArn
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:
