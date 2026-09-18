@@ -1,15 +1,14 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   Flies for a Cause - per-environment IAM role assumed by the GitHub
-  Actions CI/CD pipeline (Story 1.10) via OIDC federation, instead of
-  long-lived AWS access keys stored as GitHub secrets. Scoped so the dev
-  role can only be assumed by workflow runs on the develop branch, and the
-  prod role only by runs on main. Trusts the account's GitHub Actions OIDC
-  provider by its well-known ARN rather than importing github-oidc.yaml's
-  export, since AWS allows only one such provider per account and this
-  project may share it with other projects already using that account -
-  deploy github-oidc.yaml first only if the account doesn't already have
-  one.
+  Actions CI/CD pipeline (Story 1.10) via OIDC federation. Trust policy
+  matches the "repo:OWNER/REPO:environment:NAME" subject GitHub issues
+  for jobs that run under a GitHub Environment (owner/repo wildcarded for
+  GitHub's immutable numeric ID suffixes), so dev only trusts runs under
+  the dev Environment and prod only trusts prod. Trusts the account's
+  GitHub OIDC provider by its well-known ARN (not a stack export), since
+  AWS allows only one per account and it may be shared with other
+  projects - see infrastructure/README.md.
 
 Parameters:
   Environment:
@@ -23,13 +22,6 @@ Parameters:
     Type: String
     Description: The GitHub repository this role trusts, as "owner/repo".
     Default: ChrisMowry/flies-for-a-cause
-
-Mappings:
-  EnvironmentConfig:
-    dev:
-      TrustedBranch: develop
-    prod:
-      TrustedBranch: main
 
 Resources:
   GitHubActionsDeployRole:
@@ -50,8 +42,9 @@ Resources:
                 token.actions.githubusercontent.com:aud: sts.amazonaws.com
               StringLike:
                 token.actions.githubusercontent.com:sub: !Sub
-                  - "repo:${GitHubRepository}:ref:refs/heads/${TrustedBranch}"
-                  - TrustedBranch: !FindInMap [EnvironmentConfig, !Ref Environment, TrustedBranch]
+                  - "repo:${RepoOwner}@*/${RepoName}@*:environment:${Environment}"
+                  - RepoOwner: !Select [0, !Split ["/", !Ref GitHubRepository]]
+                    RepoName: !Select [1, !Split ["/", !Ref GitHubRepository]]
       Policies:
         - PolicyName: FliesForACauseDeployPermissions
           PolicyDocument:
