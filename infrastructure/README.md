@@ -27,7 +27,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `social-media-queue.yaml` | Per-environment `social-media-post-queue.fifo` SQS queue (+ dead-letter queue) connecting the Social Media Scraper Lambda (Epic 7) to the Social Media Post Processor Lambda (Epic 8), plus two standalone IAM managed policies scoping send vs. receive/delete access for those Lambdas' future execution roles. Has no dependencies on any other template — deployable independently, any time. |
 | `scraper-schedule.yaml` | Per-environment EventBridge rule firing every 5 minutes for the Social Media Scraper Lambda (Epic 7), plus a placeholder Lambda target proving the invoke wiring works. `ScheduleState` (`ENABLED`/`DISABLED`, default `DISABLED`) can be overridden independently per environment. Has no dependencies on any other template. |
 | `notifications.yaml` | Per-environment SNS topic the administrator subscribes to (email required, SMS optional) for scam alerts (Epic 8) and future scraper health alarms (Epic 7), plus a standalone IAM managed policy scoping publish access for those Lambdas' future execution roles. Requires the `AdminEmail` parameter. Has no dependencies on any other template. |
-| `github-oidc.yaml` | The single, global GitHub Actions OIDC identity provider. Deployed once, ever (not per environment), like `dns-zone.yaml` — see [Environments](#environments). Deploy before `deploy-role.yaml`. |
+| `github-oidc.yaml` | The single, global GitHub Actions OIDC identity provider. Deployed once, ever (not per environment), like `dns-zone.yaml` — see [Environments](#environments). Only needed if the AWS account doesn't already have one (AWS allows just one per account, so an account already used by another project for GitHub Actions may already have it - `deploy-role.yaml` trusts it by its well-known ARN, not a stack export, so it doesn't matter which project created it). |
 | `deploy-role.yaml` | Per-environment IAM role the GitHub Actions CI/CD pipeline assumes via OIDC to deploy that environment — scoped so the `dev` role only trusts workflow runs on the `develop` branch, and `prod` only trusts `main`. See [CI/CD Pipeline](#cicd-pipeline). |
 
 ## Deploying and deleting a stack
@@ -85,7 +85,7 @@ Tearing an environment down happens in the reverse order (`dns-records.yaml` fir
 
 ### One-time bootstrap (per AWS account/environment)
 
-1. Deploy `dns-zone.yaml` and `github-oidc.yaml` directly, as shown above (once per account).
+1. Deploy `dns-zone.yaml` directly, as shown above (once per account). Deploy `github-oidc.yaml` the same way only if the account doesn't already have a GitHub Actions OIDC provider (`aws iam list-open-id-connect-providers` - AWS allows only one per account, so a personal account already used for another project's GitHub Actions may already have one; `deploy-role.yaml` trusts it by ARN regardless of which project created it).
 2. Deploy `deploy-role.yaml` for each environment: `./scripts/deploy-stack.sh dev deploy-role` and `./scripts/deploy-stack.sh prod deploy-role`.
 3. In the repo's GitHub Environments (**Settings → Environments**), set two variables on **both** the `dev` and `prod` environments:
    - `AWS_DEPLOY_ROLE_ARN` — the `DeployRoleArn` output from that environment's `deploy-role.yaml` stack.
