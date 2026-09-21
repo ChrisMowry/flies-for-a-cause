@@ -45,18 +45,24 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 
 Both scripts derive the stack name from the environment and template name, so deploying and deleting a given environment's stacks is fully scripted — no manual cleanup steps in the AWS Console are required.
 
+Neither script passes `--region`, so they deploy to whatever region your AWS CLI/profile defaults to. The CI/CD pipeline always deploys to `us-east-1` (see [Prerequisites](#prerequisites)), and CloudFormation exports/imports (e.g. `certificates.yaml` and others importing `dns-zone.yaml`'s hosted zone ID) only resolve within the same region — so when deploying any of these stacks manually, make sure your default region is also `us-east-1` (e.g. `export AWS_REGION=us-east-1`, or `--region us-east-1` on `aws-vault exec`/`aws configure` for that profile) to avoid creating stacks CloudFormation can't cross-reference.
+
 For templates that take more than the `Environment` parameter, append additional bare `key=value` pairs after the template name (the script already passes `--parameter-overrides` once; don't repeat that flag) — e.g. `./scripts/deploy-stack.sh dev scraper-schedule ScheduleState=ENABLED`.
 
 `dns-zone.yaml` and `github-oidc.yaml` are the exceptions: since neither is per-environment, they don't fit `deploy-stack.sh`'s `<env> <template-name>` convention and are deployed directly instead:
 
 ```bash
-# Deploy once, ever, per AWS account
+# Deploy once, ever, per AWS account - in us-east-1, matching the CI/CD
+# pipeline's region, so other stacks (e.g. certificates.yaml) can import
+# dns-zone.yaml's exports (CloudFormation exports are region-scoped)
 aws cloudformation deploy \
+  --region us-east-1 \
   --stack-name flies-for-a-cause-dns-zone \
   --template-file cloudformation/dns-zone.yaml \
   --tags Project=FliesForACause ManagedBy=CloudFormation
 
 aws cloudformation deploy \
+  --region us-east-1 \
   --stack-name flies-for-a-cause-github-oidc \
   --template-file cloudformation/github-oidc.yaml \
   --capabilities CAPABILITY_IAM \
