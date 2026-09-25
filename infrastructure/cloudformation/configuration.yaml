@@ -1,0 +1,135 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - per-environment access policies for configuration and
+  secrets (Story 1.13). Configuration values live in SSM Parameter Store
+  under /flies-for-a-cause/<env>/... and are published by the templates that
+  own them (base.yaml, cognito.yaml, social-media-queue.yaml,
+  notifications.yaml). Secrets (third-party API keys) are SecureString
+  parameters under /flies-for-a-cause/<env>/secrets/<consumer>/<name>, set
+  out-of-band with scripts/set-secret.sh - CloudFormation can't create
+  SecureString parameters, and a secret's value must never be in a template
+  or in source control. This stack provisions standalone IAM managed
+  policies, ready to attach to the Lambdas' execution roles once Epics 3, 7,
+  and 8 create them, so each Lambda can read only its own configuration and
+  secrets. Has no dependencies on any other template.
+
+Parameters:
+  Environment:
+    Type: String
+    Description: The deployment environment this stack belongs to.
+    AllowedValues:
+      - dev
+      - prod
+
+Resources:
+  # Attach to any Lambda's execution role that reads configuration. Lists
+  # the configuration prefixes explicitly - deliberately not
+  # /flies-for-a-cause/<env>/* - so it never grants access to secrets/.
+  # New configuration prefixes must be added here. Each prefix appears twice
+  # because GetParametersByPath is authorized against the path itself,
+  # without a trailing "/*".
+  ConfigReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "flies-for-a-cause-${Environment}-config-read-policy"
+      Description: Grants read-only access to this environment's (non-secret) configuration parameters in SSM Parameter Store.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/environment"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/website-domain-name"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/api-domain-name"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/cognito"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/cognito/*"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/queue"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/queue/*"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/notifications"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/notifications/*"
+
+  # One secrets-read policy per consuming Lambda, matching the
+  # secrets/<consumer>/<name> parameter layout, so the scraper can't read the
+  # post processor's LLM key and vice versa. SecureString parameters
+  # encrypted with the AWS-managed aws/ssm key need no separate kms:Decrypt
+  # grant - that key's policy already allows principals in this account that
+  # are authorized to use SSM.
+  WebsiteSecretsReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "flies-for-a-cause-${Environment}-website-secrets-read-policy"
+      Description: Grants read access to the Website Lambda's secrets in SSM Parameter Store.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/secrets/website"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/secrets/website/*"
+
+  ScraperSecretsReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "flies-for-a-cause-${Environment}-scraper-secrets-read-policy"
+      Description: Grants read access to the Social Media Scraper Lambda's secrets in SSM Parameter Store.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/secrets/scraper"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/secrets/scraper/*"
+
+  ProcessorSecretsReadPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub "flies-for-a-cause-${Environment}-processor-secrets-read-policy"
+      Description: Grants read access to the Social Media Post Processor Lambda's secrets in SSM Parameter Store.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+            Resource:
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/secrets/post-processor"
+              - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/flies-for-a-cause/${Environment}/secrets/post-processor/*"
+
+Outputs:
+  ConfigReadPolicyArn:
+    Description: Managed policy ARN granting read access to non-secret configuration - attach to any Lambda's role that reads configuration.
+    Value: !Ref ConfigReadPolicy
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ConfigReadPolicyArn"
+
+  WebsiteSecretsReadPolicyArn:
+    Description: Managed policy ARN granting read access to the Website Lambda's secrets - attach to its role.
+    Value: !Ref WebsiteSecretsReadPolicy
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-WebsiteSecretsReadPolicyArn"
+
+  ScraperSecretsReadPolicyArn:
+    Description: Managed policy ARN granting read access to the scraper Lambda's secrets - attach to its role.
+    Value: !Ref ScraperSecretsReadPolicy
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ScraperSecretsReadPolicyArn"
+
+  ProcessorSecretsReadPolicyArn:
+    Description: Managed policy ARN granting read access to the post processor Lambda's secrets - attach to its role.
+    Value: !Ref ProcessorSecretsReadPolicy
+    Export:
+      Name: !Sub "flies-for-a-cause-${Environment}-ProcessorSecretsReadPolicyArn"

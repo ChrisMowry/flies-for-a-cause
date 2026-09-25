@@ -55,6 +55,7 @@ jobs:
           bash ./scripts/deploy-stack.sh dev social-media-queue
           bash ./scripts/deploy-stack.sh dev scraper-schedule
           bash ./scripts/deploy-stack.sh dev notifications "AdminEmail=${{ vars.ADMIN_EMAIL }}"
+          bash ./scripts/deploy-stack.sh dev configuration
 
       # CloudFormation itself rolls a failed update back automatically; this
       # step's only job is making sure a failure doesn't go unnoticed.
@@ -99,6 +100,7 @@ jobs:
           bash ./scripts/deploy-stack.sh prod social-media-queue
           bash ./scripts/deploy-stack.sh prod scraper-schedule
           bash ./scripts/deploy-stack.sh prod notifications "AdminEmail=${{ vars.ADMIN_EMAIL }}"
+          bash ./scripts/deploy-stack.sh prod configuration
 
       - name: Notify admin on failure
         if: failure()

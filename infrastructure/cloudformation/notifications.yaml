@@ -61,6 +61,20 @@ Resources:
       Protocol: sms
       Endpoint: !Ref AdminPhoneNumber
 
+  # Exposed via SSM (Story 1.13) so Lambdas can be configured per
+  # environment without hardcoding the topic ARN.
+  TopicArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/notifications/topic-arn"
+      Type: String
+      Value: !Ref AdminNotificationTopic
+      Description: The admin notification SNS topic ARN.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
   # Attach to the Social Media Post Processor Lambda's execution role
   # (Epic 8) so it can publish scam alerts directly. CloudWatch Alarms
   # (e.g. Epic 7's scraper health alarm) don't need this - same-account

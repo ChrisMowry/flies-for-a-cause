@@ -1,6 +1,6 @@
 # Infrastructure
 
-All AWS resources for **Flies for a Cause** are defined as CloudFormation templates in `cloudformation/` and deployed via the scripts in `scripts/`. There is no manual ("click-ops") resource creation — every resource must be defined here.
+All AWS resources for **Flies for a Cause** are defined as CloudFormation templates in `cloudformation/` and deployed via the scripts in `scripts/`. There is no manual ("click-ops") resource creation — every resource must be defined here. (The one deliberate exception is secret *values*, which CloudFormation can't hold safely: they're set out-of-band with `scripts/set-secret.sh` — see [Configuration and secrets](#configuration-and-secrets).)
 
 ## Environments
 
@@ -27,6 +27,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `social-media-queue.yaml` | Per-environment `social-media-post-queue.fifo` SQS queue (+ dead-letter queue) connecting the Social Media Scraper Lambda (Epic 7) to the Social Media Post Processor Lambda (Epic 8), plus two standalone IAM managed policies scoping send vs. receive/delete access for those Lambdas' future execution roles. Has no dependencies on any other template — deployable independently, any time. |
 | `scraper-schedule.yaml` | Per-environment EventBridge rule firing every 5 minutes for the Social Media Scraper Lambda (Epic 7), plus a placeholder Lambda target proving the invoke wiring works. `ScheduleState` (`ENABLED`/`DISABLED`, default `DISABLED`) can be overridden independently per environment. Has no dependencies on any other template. |
 | `notifications.yaml` | Per-environment SNS topic the administrator subscribes to (email required, SMS optional) for scam alerts (Epic 8) and future scraper health alarms (Epic 7), plus a standalone IAM managed policy scoping publish access for those Lambdas' future execution roles. Requires the `AdminEmail` parameter. Has no dependencies on any other template. |
+| `configuration.yaml` | Per-environment IAM managed policies for reading configuration and secrets from SSM Parameter Store: one for the shared non-secret configuration, and one secrets-read policy per Lambda (website, scraper, post processor), ready to attach to those Lambdas' execution roles. Has no dependencies on any other template. See [Configuration and secrets](#configuration-and-secrets). |
 | `github-oidc.yaml` | The single, global GitHub Actions OIDC identity provider. Deployed once, ever (not per environment), like `dns-zone.yaml` — see [Environments](#environments). Only needed if the AWS account doesn't already have one (AWS allows just one per account, so an account already used by another project for GitHub Actions may already have it - `deploy-role.yaml` trusts it by its well-known ARN, not a stack export, so it doesn't matter which project created it). |
 | `deploy-role.yaml` | Per-environment IAM role the GitHub Actions CI/CD pipeline assumes via OIDC to deploy that environment — scoped so the `dev` role only trusts workflow runs under the `dev` GitHub Environment, and `prod` only trusts runs under `prod` (each Environment is itself restricted to its matching branch). See [CI/CD Pipeline](#cicd-pipeline). |
 
@@ -98,7 +99,7 @@ Later templates import values (domain names, certificate ARNs, the hosted zone I
 
 Tearing an environment down happens in the reverse order (`dns-records.yaml` first, `base.yaml` last), so nothing is deleted out from under a stack that still imports its exports.
 
-`social-media-queue.yaml <env>`, `scraper-schedule.yaml <env>`, and `notifications.yaml <env>` have no dependencies on any other template (none of them import anything) and can each be deployed or deleted at any point, independent of everything above and of each other.
+`social-media-queue.yaml <env>`, `scraper-schedule.yaml <env>`, `notifications.yaml <env>`, and `configuration.yaml <env>` have no dependencies on any other template (none of them import anything) and can each be deployed or deleted at any point, independent of everything above and of each other.
 
 ## CI/CD Pipeline
 
@@ -177,6 +178,66 @@ Each update is atomic, so invocations are never dropped ("no downtime"). Layer v
 ./scripts/deploy-stack.sh dev deploy-role
 ./scripts/deploy-stack.sh prod deploy-role
 ```
+
+## Configuration and secrets
+
+All per-environment configuration lives in **SSM Parameter Store** under `/flies-for-a-cause/<env>/...`, so the UI and Lambdas are built once and configured for dev or prod by reading from here — nothing environment-specific is hardcoded or committed. Parameter Store is used for both configuration and secrets (rather than Secrets Manager) because it's free at this scale and gives one mechanism for both.
+
+### Configuration (non-secret)
+
+Published by CloudFormation, by the template that owns each value, so it can never drift from the real resource:
+
+| Parameter | Published by | Read by |
+| --- | --- | --- |
+| `/environment` | `base.yaml` | UI, Lambdas |
+| `/website-domain-name`, `/api-domain-name` | `base.yaml` | UI build (`VITE_API_BASE_URL`), Lambdas |
+| `/cognito/user-pool-id`, `/cognito/user-pool-client-id` | `cognito.yaml` | UI build |
+| `/queue/social-media-post-url`, `/queue/social-media-post-arn`, `/queue/social-media-post-dlq-arn` | `social-media-queue.yaml` | Scraper and post processor Lambdas |
+| `/notifications/topic-arn` | `notifications.yaml` | Post processor Lambda |
+
+A template that adds a new configuration value publishes it as an `AWS::SSM::Parameter` the same way, and adds its prefix to `ConfigReadPolicy` in `configuration.yaml`. To see everything stored for an environment (secrets by name only, never their values): `./scripts/list-config.sh dev`.
+
+**How consumers read it:**
+
+- **UI build:** `scripts/deploy-ui.sh` reads the parameters at build time and injects them as `VITE_*` variables (see [UI deployment pipeline](#ui-deployment-pipeline)).
+- **Lambdas:** a Lambda defined in CloudFormation can take a plain value at deploy time as an environment variable through an SSM dynamic reference (`{{resolve:ssm:/flies-for-a-cause/${Environment}/queue/social-media-post-url}}`) or a stack import, and needs no IAM access to do so. A Lambda that reads a parameter itself at runtime needs the `ConfigReadPolicy` attached to its execution role.
+
+### Secrets
+
+Third-party API keys and other secrets (e.g. the Instagram credentials in Epic 7, an LLM key in Epic 8) are **SecureString** parameters (encrypted with the AWS-managed `aws/ssm` key) at:
+
+```
+/flies-for-a-cause/<env>/secrets/<consumer>/<secret-name>
+```
+
+where `<consumer>` is the Lambda that reads it: `website`, `scraper`, or `post-processor`. The stories that need a secret choose its `<secret-name>`.
+
+CloudFormation can't create SecureString parameters, and a secret's value must never appear in a template or in source control, so secrets are set by hand with `scripts/set-secret.sh`, once per environment (and again to rotate one):
+
+```bash
+# Prompts for the value without echoing it
+./scripts/set-secret.sh dev scraper instagram-access-token
+
+# Or pipe it in
+printf '%s' "$VALUE" | ./scripts/set-secret.sh prod scraper instagram-access-token
+```
+
+The value is read from stdin or a hidden prompt (never a command-line argument, so it stays out of shell history and process listings) and handed to the AWS CLI through a private temporary file that's deleted immediately.
+
+Secrets are read **at runtime**, not deploy time: CloudFormation can't inject a SecureString into a Lambda's environment, and putting the value there would expose it in the console and stack metadata anyway. Pass the Lambda its secret's *parameter name* as an environment variable, attach that Lambda's secrets-read policy from `configuration.yaml`, and have the Lambda fetch the value with `GetParameter` (with decryption) at cold start, caching it for the life of the execution environment.
+
+| Policy (export) | Attach to | Grants read of |
+| --- | --- | --- |
+| `flies-for-a-cause-<env>-ConfigReadPolicyArn` | Any Lambda that reads configuration | The non-secret configuration parameters above |
+| `flies-for-a-cause-<env>-WebsiteSecretsReadPolicyArn` | Website Lambda | `/secrets/website/*` |
+| `flies-for-a-cause-<env>-ScraperSecretsReadPolicyArn` | Scraper Lambda | `/secrets/scraper/*` |
+| `flies-for-a-cause-<env>-ProcessorSecretsReadPolicyArn` | Post processor Lambda | `/secrets/post-processor/*` |
+
+### Keeping secrets out of source control
+
+- Secret values are only ever written by `set-secret.sh` to Parameter Store — no template, script, workflow, or variable in this repository holds one. GitHub Environment variables (`AWS_DEPLOY_ROLE_ARN`, `ADMIN_EMAIL`) are identifiers, not secrets, and the pipelines authenticate to AWS through OIDC rather than stored keys.
+- `.gitignore` excludes `.env` files (other than `.env.example`), `*.pem`, `*.key`, and `secrets*.json`.
+- GitGuardian scans every pull request for committed secrets.
 
 ## Verifying the website hosting stack
 
