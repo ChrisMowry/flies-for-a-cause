@@ -3,7 +3,7 @@ name: Deploy Infrastructure
 # Story 1.10: deploys CloudFormation changes on merge to the appropriate
 # branch - develop -> the dev environment, main -> prod (gated behind the
 # "prod" GitHub Environment's required reviewer). Excludes dns-zone.yaml,
-# github-oidc.yaml, and deploy-role.yaml: those are one-time/global
+# github-oidc.yaml, budget.yaml, and deploy-role.yaml: those are one-time/global
 # bootstrap stacks deployed manually once per account (see
 # infrastructure/README.md) - the pipeline can't deploy the very role it
 # needs in order to run.
