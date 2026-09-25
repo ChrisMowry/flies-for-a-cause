@@ -146,6 +146,38 @@ The workflow calls `scripts/deploy-ui.sh <dev|prod>`, which can also be run loca
 
 The environment's `hosting.yaml` (and, for the configuration above, `base.yaml` and `cognito.yaml`) must already be deployed. The UI project itself is expected at `ui/` with a committed `package-lock.json` — the workflow's npm cache keys off it.
 
+## Lambda deployment pipeline
+
+`.github/workflows/deploy-lambdas.yml` tests, packages, and deploys the Lambda functions and the shared data-access layer: a push to `develop` deploys to `dev`, and a push to `main` deploys to `prod` (behind the same `prod` approval gate). It runs when anything under `lambdas/` or `layers/` changes, or manually via **Actions → Deploy Lambdas → Run workflow**, using the same OIDC deploy role, `AWS_DEPLOY_ROLE_ARN` variable, and SNS failure notification as the other pipelines. The work is done by `scripts/deploy-lambdas.sh <dev|prod>`, which can also be run by hand (Linux/macOS/WSL, with `zip`, Node, and Python 3 installed, and credentials for that environment).
+
+### Repository layout
+
+| Path | Contents | Deployed as |
+| --- | --- | --- |
+| `layers/shared/` | The shared DynamoDB data-access layer (Epic 2): a Node/TypeScript package with a `package-lock.json` whose `npm run build` produces `dist/`. Optional `npm test`. | Layer `flies-for-a-cause-<env>-shared` |
+| `lambdas/<name>/` (Node/TypeScript) | Has a `package.json` and `package-lock.json`. `npm run build` must produce a self-contained `dist/` (bundle the dependencies, e.g. with esbuild, but leave the shared layer package external — Lambda provides it). Optional `npm test`. | Function `flies-for-a-cause-<env>-<name>` |
+| `lambdas/<name>/` (Python) | Has a `requirements.txt` (empty is fine). Dependencies are installed alongside the source. If there is a `tests/` directory it's run with `pytest` (list `pytest` in `requirements-dev.txt`, which is installed for testing only). | Function `flies-for-a-cause-<env>-<name>` |
+
+The three functions are `lambdas/website`, `lambdas/scraper`, and `lambdas/post-processor`. The `website` and `post-processor` functions consume the shared layer (the `LAYER_CONSUMERS` list in the script).
+
+### What the pipeline does
+
+1. Confirms every function it's about to deploy exists — the **functions themselves are created by CloudFormation** (Epics 3, 7, and 8), this pipeline only ships their code — before doing any work.
+2. Tests and builds the layer and every function. **Nothing is written to AWS until all of them pass**, so a failing test blocks the whole deploy.
+3. Publishes the layer as a new version and, for each consuming function, swaps the previous shared-layer version in its layer list for the new one (any other layers the function has are kept).
+4. Updates each function's code, waiting for each update to finish before moving on.
+
+Each update is atomic, so invocations are never dropped ("no downtime"). Layer versions are immutable and numbered, so a function can be pinned back to an earlier one. The layer goes first, then the code, so layer changes should stay backward compatible with the function code currently deployed.
+
+### One-time setup for the layer permission
+
+`deploy-role.yaml` gained a `LambdaLayers` statement (publish/get/list layer versions on `flies-for-a-cause-*` layers). Since `deploy-role.yaml` is a bootstrap stack the pipeline can't deploy itself, redeploy it manually for each environment before the first layer publish:
+
+```bash
+./scripts/deploy-stack.sh dev deploy-role
+./scripts/deploy-stack.sh prod deploy-role
+```
+
 ## Verifying the website hosting stack
 
 After deploying `hosting.yaml`, confirm the S3 bucket and CloudFront distribution are correctly wired together by uploading a test page and requesting it through CloudFront (not directly from S3 — direct S3 access should be blocked):

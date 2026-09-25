@@ -1,0 +1,104 @@
+name: Deploy Lambdas
+
+# Story 1.12: tests, packages, and deploys the Lambda functions (lambdas/) and
+# the shared data-access layer (layers/shared/) - develop -> the dev
+# environment, main -> prod (gated behind the "prod" GitHub Environment's
+# required reviewer). Tests run before anything is deployed, so a failing test
+# blocks the whole deploy. The functions themselves are created by
+# CloudFormation; see infrastructure/README.md.
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - "lambdas/**"
+      - "layers/**"
+      - "infrastructure/scripts/deploy-lambdas.sh"
+      - ".github/workflows/deploy-lambdas.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # required to assume the deploy role via OIDC
+
+jobs:
+  deploy-dev:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: dev
+    # Two overlapping deploys would race on the same functions and layer -
+    # queue rather than cancel a half-published one.
+    concurrency:
+      group: deploy-lambdas-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Test, build, and deploy Lambdas
+        run: bash ./infrastructure/scripts/deploy-lambdas.sh dev
+
+      # Same failure channel as the other pipelines: GitHub emails failed
+      # workflows by default, and this adds the project's own SNS alerting.
+      - name: Notify admin on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-notifications \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+          aws sns publish --topic-arn "${TOPIC_ARN}" \
+            --subject "Flies for a Cause - dev Lambda deploy failed" \
+            --message "Workflow run ${{ github.run_id }} failed deploying the dev Lambdas from commit ${{ github.sha }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The "prod" GitHub Environment requires approval from a reviewer before
+    # this job is allowed to run - see infrastructure/README.md.
+    environment: prod
+    concurrency:
+      group: deploy-lambdas-prod
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Test, build, and deploy Lambdas
+        run: bash ./infrastructure/scripts/deploy-lambdas.sh prod
+
+      - name: Notify admin on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-prod-notifications \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+          aws sns publish --topic-arn "${TOPIC_ARN}" \
+            --subject "Flies for a Cause - PROD Lambda deploy failed" \
+            --message "Workflow run ${{ github.run_id }} failed deploying the PROD Lambdas from commit ${{ github.sha }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
