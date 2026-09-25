@@ -26,6 +26,11 @@ jobs:
   deploy-dev:
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
+    # A healthy deploy takes ~15-25 min (mostly CloudFront). Anything past this
+    # is a hang - typically certificates.yaml waiting on ACM DNS validation
+    # because the registrar's nameservers don't match the hosted zone's (see
+    # infrastructure/README.md) - so fail fast and fire the failure notification.
+    timeout-minutes: 45
     environment: dev
     defaults:
       run:

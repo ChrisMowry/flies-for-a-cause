@@ -69,6 +69,21 @@ aws cloudformation deploy \
   --tags Project=FliesForACause ManagedBy=CloudFormation
 ```
 
+> **After (re)creating `dns-zone.yaml`, point the domain at the new zone's nameservers.** Every hosted zone gets its own random set of four nameservers, so if the stack is ever deleted and recreated, the domain registration (which lives outside CloudFormation) keeps delegating to the old zone. Nothing in the templates breaks — they import the new zone ID — but ACM DNS validation in `certificates.yaml` can never succeed, so that stack sits in `CREATE_IN_PROGRESS` indefinitely and the CI/CD deploy hangs until it times out. Fix it by updating the registrar:
+>
+> ```bash
+> # The zone's current nameservers
+> aws cloudformation describe-stacks --region us-east-1 --stack-name flies-for-a-cause-dns-zone \
+>   --query "Stacks[0].Outputs[?OutputKey=='NameServers'].OutputValue" --output text
+>
+> # Set them on the registered domain (Route 53 Domains) - list all four
+> aws route53domains update-domain-nameservers --region us-east-1 \
+>   --domain-name flies-for-a-cause.org \
+>   --nameservers Name=<ns-1> Name=<ns-2> Name=<ns-3> Name=<ns-4>
+> ```
+>
+> To check for a mismatch, compare that list against `nslookup -type=NS flies-for-a-cause.org`.
+
 ### Deployment order for a new environment
 
 Later templates import values (domain names, certificate ARNs, the hosted zone ID, the Cognito pool, the API Gateway custom domain) exported by earlier ones, so they must be deployed in this order the first time an environment is stood up:
@@ -107,6 +122,8 @@ The `dev` and `prod` GitHub Environments themselves (referenced by the workflow'
 ### Failure handling
 
 A failed deploy doesn't leave a stack half-updated — CloudFormation automatically rolls a failed update back on its own. To make sure a failure doesn't go unnoticed, each job's last step (on failure) publishes to that environment's `notifications.yaml` SNS topic, in addition to GitHub's own default failed-workflow email.
+
+The `deploy-dev` job has a 45-minute `timeout-minutes` so a hang fails (and notifies) instead of running for hours. The usual culprit is `certificates.yaml` waiting on DNS validation — see the nameserver note under [Deploying and deleting a stack](#deploying-and-deleting-a-stack).
 
 ## Verifying the website hosting stack
 
