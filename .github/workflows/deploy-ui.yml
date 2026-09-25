@@ -1,0 +1,100 @@
+name: Deploy UI
+
+# Story 1.11: builds the Vite/React/TypeScript UI (ui/) and publishes it to the
+# environment's S3 website bucket, then invalidates the CloudFront cache -
+# develop -> the dev environment, main -> prod (gated behind the "prod" GitHub
+# Environment's required reviewer). The environment's hosting stack
+# (hosting.yaml) must already be deployed; see infrastructure/README.md.
+# Environment-specific configuration is read from SSM at build time by
+# infrastructure/scripts/deploy-ui.sh, so the same source builds for both.
+on:
+  push:
+    branches:
+      - develop
+      - main
+    paths:
+      - "ui/**"
+      - "infrastructure/scripts/deploy-ui.sh"
+      - ".github/workflows/deploy-ui.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  id-token: write # required to assume the deploy role via OIDC
+
+jobs:
+  deploy-dev:
+    if: github.ref == 'refs/heads/develop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: dev
+    # Two overlapping deploys would race on the same bucket, and a newer push
+    # may already be building - queue rather than cancel a half-published one.
+    concurrency:
+      group: deploy-ui-dev
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Build and deploy UI
+        run: bash ./infrastructure/scripts/deploy-ui.sh dev
+
+      # Same failure channel as deploy-infrastructure.yml: GitHub emails failed
+      # workflows by default, and this adds the project's own SNS alerting.
+      - name: Notify admin on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-dev-notifications \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+          aws sns publish --topic-arn "${TOPIC_ARN}" \
+            --subject "Flies for a Cause - dev UI deploy failed" \
+            --message "Workflow run ${{ github.run_id }} failed deploying the dev UI from commit ${{ github.sha }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  deploy-prod:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The "prod" GitHub Environment requires approval from a reviewer before
+    # this job is allowed to run - see infrastructure/README.md.
+    environment: prod
+    concurrency:
+      group: deploy-ui-prod
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Build and deploy UI
+        run: bash ./infrastructure/scripts/deploy-ui.sh prod
+
+      - name: Notify admin on failure
+        if: failure()
+        continue-on-error: true
+        run: |
+          TOPIC_ARN=$(aws cloudformation describe-stacks --stack-name flies-for-a-cause-prod-notifications \
+            --query "Stacks[0].Outputs[?OutputKey=='TopicArn'].OutputValue" --output text)
+          aws sns publish --topic-arn "${TOPIC_ARN}" \
+            --subject "Flies for a Cause - PROD UI deploy failed" \
+            --message "Workflow run ${{ github.run_id }} failed deploying the PROD UI from commit ${{ github.sha }}. See: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
