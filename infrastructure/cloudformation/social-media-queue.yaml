@@ -68,6 +68,45 @@ Resources:
         - Key: ManagedBy
           Value: CloudFormation
 
+  # Queue identifiers exposed via SSM (Story 1.13), the same way base.yaml
+  # exposes the domain names, so the Lambdas can be configured per
+  # environment without hardcoding these values.
+  QueueUrlParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/queue/social-media-post-url"
+      Type: String
+      Value: !Ref SocialMediaPostQueue
+      Description: The social media post queue URL.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  QueueArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/queue/social-media-post-arn"
+      Type: String
+      Value: !GetAtt SocialMediaPostQueue.Arn
+      Description: The social media post queue ARN.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
+  DeadLetterQueueArnParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub "/flies-for-a-cause/${Environment}/queue/social-media-post-dlq-arn"
+      Type: String
+      Value: !GetAtt SocialMediaPostDeadLetterQueue.Arn
+      Description: The social media post dead-letter queue ARN.
+      Tags:
+        Environment: !Ref Environment
+        Project: FliesForACause
+        ManagedBy: CloudFormation
+
   # Attach to the Social Media Scraper Lambda's execution role (Epic 7).
   ScraperQueueSendPolicy:
     Type: AWS::IAM::ManagedPolicy
