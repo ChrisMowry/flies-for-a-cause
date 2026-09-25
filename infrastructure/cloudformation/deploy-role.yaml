@@ -97,6 +97,20 @@ Resources:
                 Action: lambda:*
                 Resource: !Sub "arn:aws:lambda:*:${AWS::AccountId}:function:flies-for-a-cause-*"
 
+              # Lambda layers are their own resource type (layer:<name>[:<version>]),
+              # so the function-scoped statement above doesn't cover them. The
+              # Lambda deploy pipeline (Story 1.12) publishes new versions of the
+              # shared layer and attaches them to functions.
+              - Sid: LambdaLayers
+                Effect: Allow
+                Action:
+                  - lambda:PublishLayerVersion
+                  - lambda:GetLayerVersion
+                  - lambda:ListLayerVersions
+                Resource:
+                  - !Sub "arn:aws:lambda:*:${AWS::AccountId}:layer:flies-for-a-cause-*"
+                  - !Sub "arn:aws:lambda:*:${AWS::AccountId}:layer:flies-for-a-cause-*:*"
+
               - Sid: Sqs
                 Effect: Allow
                 Action: sqs:*
