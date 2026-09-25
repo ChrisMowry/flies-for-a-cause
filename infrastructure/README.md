@@ -125,6 +125,27 @@ A failed deploy doesn't leave a stack half-updated — CloudFormation automatica
 
 The `deploy-dev` job has a 45-minute `timeout-minutes` so a hang fails (and notifies) instead of running for hours. The usual culprit is `certificates.yaml` waiting on DNS validation — see the nameserver note under [Deploying and deleting a stack](#deploying-and-deleting-a-stack).
 
+## UI deployment pipeline
+
+`.github/workflows/deploy-ui.yml` builds the Vite/React/TypeScript UI and publishes it to the environment's website bucket: a push to `develop` deploys to `dev`, and a push to `main` deploys to `prod` (behind the same `prod` approval gate as the infrastructure pipeline). It runs when anything under `ui/` changes, or manually via **Actions → Deploy UI → Run workflow**. It uses the same OIDC deploy role and `AWS_DEPLOY_ROLE_ARN` environment variable as the infrastructure pipeline, so no additional AWS or GitHub setup is needed, and it publishes to the same SNS topic on failure.
+
+The workflow calls `scripts/deploy-ui.sh <dev|prod>`, which can also be run locally (with credentials for that environment) to deploy by hand. It:
+
+1. Reads the environment's configuration from SSM Parameter Store and exposes it to the build as Vite variables, so the same source builds for both environments and nothing environment-specific is committed:
+
+   | Variable | Source |
+   | --- | --- |
+   | `VITE_API_BASE_URL` | `https://` + `/flies-for-a-cause/<env>/api-domain-name` (`base.yaml`) |
+   | `VITE_COGNITO_USER_POOL_ID` | `/flies-for-a-cause/<env>/cognito/user-pool-id` (`cognito.yaml`) |
+   | `VITE_COGNITO_USER_POOL_CLIENT_ID` | `/flies-for-a-cause/<env>/cognito/user-pool-client-id` (`cognito.yaml`) |
+   | `VITE_ENVIRONMENT` | `dev` or `prod` |
+
+2. Runs `npm ci` and `npm run build` in `ui/` (which must produce `ui/dist/index.html`).
+3. Syncs `ui/dist/assets/` (content-hashed, so cached for a year and never deleted) and then the rest of `dist/` (`no-cache`, with `--delete`) to the bucket named by the `hosting.yaml` stack's `WebsiteBucketName` output.
+4. Invalidates `/*` on the distribution from the `WebsiteDistributionId` output and waits for it to complete.
+
+The environment's `hosting.yaml` (and, for the configuration above, `base.yaml` and `cognito.yaml`) must already be deployed. The UI project itself is expected at `ui/` with a committed `package-lock.json` — the workflow's npm cache keys off it.
+
 ## Verifying the website hosting stack
 
 After deploying `hosting.yaml`, confirm the S3 bucket and CloudFront distribution are correctly wired together by uploading a test page and requesting it through CloudFront (not directly from S3 — direct S3 access should be blocked):
