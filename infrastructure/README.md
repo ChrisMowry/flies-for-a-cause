@@ -4,7 +4,7 @@ All AWS resources for **Flies for a Cause** are defined as CloudFormation templa
 
 ## Environments
 
-Every template accepts an `Environment` parameter with allowed values `dev` and `prod`, **except `dns-zone.yaml` and `github-oidc.yaml`**. A Route53 hosted zone covers the apex domain and all of its subdomains (production and development alike), and an AWS account can only have one OIDC provider per issuer URL, so both are single global stacks deployed once, ever, per AWS account — not per environment. Every other stack is a fully separate, independently deployable set of resources per environment — nothing else is shared between dev and prod.
+Every template accepts an `Environment` parameter with allowed values `dev` and `prod`, **except `dns-zone.yaml`, `github-oidc.yaml`, and `budget.yaml`**. A Route53 hosted zone covers the apex domain and all of its subdomains (production and development alike), an AWS account can only have one OIDC provider per issuer URL, and the ~$50/month cost budget covers the whole project rather than each environment, so all three are single global stacks deployed once, ever, per AWS account — not per environment. Every other stack is a fully separate, independently deployable set of resources per environment — nothing else is shared between dev and prod.
 
 ## Conventions
 
@@ -28,6 +28,7 @@ Every template accepts an `Environment` parameter with allowed values `dev` and 
 | `scraper-schedule.yaml` | Per-environment EventBridge rule firing every 5 minutes for the Social Media Scraper Lambda (Epic 7), plus a placeholder Lambda target proving the invoke wiring works. `ScheduleState` (`ENABLED`/`DISABLED`, default `DISABLED`) can be overridden independently per environment. Has no dependencies on any other template. |
 | `notifications.yaml` | Per-environment SNS topic the administrator subscribes to (email required, SMS optional) for scam alerts (Epic 8) and future scraper health alarms (Epic 7), plus a standalone IAM managed policy scoping publish access for those Lambdas' future execution roles. Requires the `AdminEmail` parameter. Has no dependencies on any other template. |
 | `configuration.yaml` | Per-environment IAM managed policies for reading configuration and secrets from SSM Parameter Store: one for the shared non-secret configuration, and one secrets-read policy per Lambda (website, scraper, post processor), ready to attach to those Lambdas' execution roles. Has no dependencies on any other template. See [Configuration and secrets](#configuration-and-secrets). |
+| `budget.yaml` | The single, global monthly AWS cost budget (default $50) that emails the administrator at 50%, 80%, and 100% of actual spend and when spend is forecast to exceed 100%. Deployed once, ever (not per environment), like `dns-zone.yaml` — see [Cost monitoring](#cost-monitoring). |
 | `github-oidc.yaml` | The single, global GitHub Actions OIDC identity provider. Deployed once, ever (not per environment), like `dns-zone.yaml` — see [Environments](#environments). Only needed if the AWS account doesn't already have one (AWS allows just one per account, so an account already used by another project for GitHub Actions may already have it - `deploy-role.yaml` trusts it by its well-known ARN, not a stack export, so it doesn't matter which project created it). |
 | `deploy-role.yaml` | Per-environment IAM role the GitHub Actions CI/CD pipeline assumes via OIDC to deploy that environment — scoped so the `dev` role only trusts workflow runs under the `dev` GitHub Environment, and `prod` only trusts runs under `prod` (each Environment is itself restricted to its matching branch). See [CI/CD Pipeline](#cicd-pipeline). |
 
@@ -50,7 +51,7 @@ Neither script passes `--region`, so they deploy to whatever region your AWS CLI
 
 For templates that take more than the `Environment` parameter, append additional bare `key=value` pairs after the template name (the script already passes `--parameter-overrides` once; don't repeat that flag) — e.g. `./scripts/deploy-stack.sh dev scraper-schedule ScheduleState=ENABLED`.
 
-`dns-zone.yaml` and `github-oidc.yaml` are the exceptions: since neither is per-environment, they don't fit `deploy-stack.sh`'s `<env> <template-name>` convention and are deployed directly instead:
+`dns-zone.yaml`, `github-oidc.yaml`, and `budget.yaml` are the exceptions: since none is per-environment, they don't fit `deploy-stack.sh`'s `<env> <template-name>` convention and are deployed directly instead:
 
 ```bash
 # Deploy once, ever, per AWS account - in us-east-1, matching the CI/CD
@@ -69,6 +70,8 @@ aws cloudformation deploy \
   --capabilities CAPABILITY_IAM \
   --tags Project=FliesForACause ManagedBy=CloudFormation
 ```
+
+`budget.yaml` is deployed the same way, but takes an `AdminEmail` parameter and needs one extra billing step — see [Cost monitoring](#cost-monitoring).
 
 > **After (re)creating `dns-zone.yaml`, point the domain at the new zone's nameservers.** Every hosted zone gets its own random set of four nameservers, so if the stack is ever deleted and recreated, the domain registration (which lives outside CloudFormation) keeps delegating to the old zone. Nothing in the templates breaks — they import the new zone ID — but ACM DNS validation in `certificates.yaml` can never succeed, so that stack sits in `CREATE_IN_PROGRESS` indefinitely and the CI/CD deploy hangs until it times out. Fix it by updating the registrar:
 >
@@ -239,7 +242,52 @@ Secrets are read **at runtime**, not deploy time: CloudFormation can't inject a 
 - `.gitignore` excludes `.env` files (other than `.env.example`), `*.pem`, `*.key`, and `secrets*.json`.
 - GitGuardian scans every pull request for committed secrets.
 
+## Cost monitoring
+
+`budget.yaml` creates one AWS Budget, `flies-for-a-cause-monthly-budget`, for the project's ~$50/month operational target (dev and prod together — it's a single global stack). It emails the administrator when:
+
+| Alert | Fires when |
+| --- | --- |
+| Actual spend | reaches 50%, 80%, and 100% of the budget |
+| Forecasted spend | AWS projects month-end spend will exceed 100% — usually the earliest warning, well before the limit is hit (it needs some usage history, so it may not fire in a brand-new account's first weeks) |
+
+The limit is the `MonthlyBudgetUsd` parameter (default `50`), and the thresholds are percentages of it.
+
+### One-time setup
+
+The stack is deployed manually, once per AWS account, in `us-east-1` (AWS Budgets' CloudFormation support is only available there):
+
+```bash
+aws cloudformation deploy \
+  --region us-east-1 \
+  --stack-name flies-for-a-cause-budget \
+  --template-file cloudformation/budget.yaml \
+  --parameter-overrides AdminEmail=<administrator email> \
+  --tags Project=FliesForACause ManagedBy=CloudFormation
+
+# Activate the "Project" cost allocation tag so the budget can filter on it
+aws ce update-cost-allocation-tags-status \
+  --cost-allocation-tags-status TagKey=Project,Status=Active
+```
+
+By default the budget counts only resources tagged `Project=FliesForACause` — every resource this project creates carries that tag — so other workloads in the same AWS account don't count against the $50. Filtering on a tag requires it to be an **active cost allocation tag** (the second command above, or **Billing → Cost allocation tags**). Activation can take up to 24 hours to take effect, and only spend after activation is attributed to the tag, so the budget under-reports until then. Anything untagged (a few resource types, such as the EventBridge rule, can't carry tags) isn't counted either. To budget the whole account instead, deploy with `ScopeToProjectTag=false`.
+
+To verify it, and to change the limit later (re-run the deploy command with `MonthlyBudgetUsd=<amount>`):
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+aws budgets describe-budget --account-id "${ACCOUNT_ID}" \
+  --budget-name flies-for-a-cause-monthly-budget
+
+aws budgets describe-notifications-for-budget --account-id "${ACCOUNT_ID}" \
+  --budget-name flies-for-a-cause-monthly-budget
+```
+
+Budget alert emails go straight to `AdminEmail` (they don't use the per-environment SNS topics from `notifications.yaml`, and need no subscription confirmation). This is an alerting-only budget — it doesn't take any automated action, like stopping resources, when a threshold is crossed.
+
 ## Verifying the website hosting stack
+
 
 After deploying `hosting.yaml`, confirm the S3 bucket and CloudFront distribution are correctly wired together by uploading a test page and requesting it through CloudFront (not directly from S3 — direct S3 access should be blocked):
 

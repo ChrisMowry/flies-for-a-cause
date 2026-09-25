@@ -1,0 +1,100 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Flies for a Cause - monthly AWS cost budget and alerting (Story 1.14). A
+  single, global stack (not per environment): the ~$50/month operational
+  target covers dev and prod together. Emails the administrator when actual
+  spend reaches 50%, 80%, and 100% of the budget, and when AWS forecasts
+  that spend will exceed 100% - an early warning before the limit is hit.
+  Has no dependencies on any other template. MUST be deployed in us-east-1
+  (AWS Budgets' CloudFormation support is only available there). See
+  infrastructure/README.md for the one-time deploy command and the
+  cost-allocation-tag step needed for the default project-scoped filter.
+
+Parameters:
+  AdminEmail:
+    Type: String
+    Description: Email address that receives the budget alerts.
+
+  MonthlyBudgetUsd:
+    Type: Number
+    Description: The monthly cost limit, in USD, that the alert thresholds are percentages of.
+    Default: 50
+    MinValue: 1
+
+  ScopeToProjectTag:
+    Type: String
+    Description: >
+      "true" limits the budget to resources tagged Project=FliesForACause
+      (every resource this project creates carries that tag), so other
+      workloads in the same AWS account don't count against it. Requires the
+      "Project" cost allocation tag to be activated in the Billing console -
+      see infrastructure/README.md. "false" budgets the whole account.
+    AllowedValues:
+      - "true"
+      - "false"
+    Default: "true"
+
+Conditions:
+  ScopedToProjectTag: !Equals [!Ref ScopeToProjectTag, "true"]
+
+Resources:
+  # AWS::Budgets::Budget has no Tags property, so (like the EventBridge rule
+  # in scraper-schedule.yaml) this resource is left untagged; its name
+  # identifies it.
+  MonthlyCostBudget:
+    Type: AWS::Budgets::Budget
+    Properties:
+      Budget:
+        BudgetName: flies-for-a-cause-monthly-budget
+        BudgetType: COST
+        TimeUnit: MONTHLY
+        BudgetLimit:
+          Amount: !Ref MonthlyBudgetUsd
+          Unit: USD
+        CostFilters: !If
+          - ScopedToProjectTag
+          - TagKeyValue:
+              - "user:Project$FliesForACause"
+          - !Ref AWS::NoValue
+      NotificationsWithSubscribers:
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 50
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AdminEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 80
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AdminEmail
+        - Notification:
+            NotificationType: ACTUAL
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AdminEmail
+        # Fires when AWS projects month-end spend will exceed the budget,
+        # typically well before the actual-spend alerts above.
+        - Notification:
+            NotificationType: FORECASTED
+            ComparisonOperator: GREATER_THAN
+            Threshold: 100
+            ThresholdType: PERCENTAGE
+          Subscribers:
+            - SubscriptionType: EMAIL
+              Address: !Ref AdminEmail
+
+Outputs:
+  BudgetName:
+    Description: The name of the monthly cost budget.
+    Value: flies-for-a-cause-monthly-budget
+    Export:
+      Name: flies-for-a-cause-budget-BudgetName
